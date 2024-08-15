@@ -1,0 +1,14 @@
+[package]
+name = "bdk-async-persist"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+sqlx = { version = "0.8.0", features = ["sqlite", "runtime-tokio-rustls"] }
+tokio = { version = "1.39.2", features = ["full"] }
+
+[dependencies.bdk_wallet]
+path = "../bdk/crates/wallet"
+#git = "https://github.com/evanlinjin/bdk"
+#branch = "simplify_wallet_persistence"
