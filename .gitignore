@@ -1,4 +1,7 @@
 /target
 Cargo.lock
+
+.env
+
 *.sql
 *.db
