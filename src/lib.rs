@@ -54,18 +54,21 @@ impl Store {
 impl AsyncWalletPersister for Store {
     type Error = Error;
 
-    fn initialize<'a>(&'a mut self) -> FutureResult<'a, ChangeSet, Self::Error>
+    fn initialize<'a>(store: &'a mut Self) -> FutureResult<'a, ChangeSet, Self::Error>
     where
         Self: 'a,
     {
-        Box::pin(self.migrate_and_read())
+        Box::pin(store.migrate_and_read())
     }
 
-    fn persist<'a>(&'a mut self, changeset: &'a ChangeSet) -> FutureResult<'a, (), Self::Error>
+    fn persist<'a>(
+        store: &'a mut Self,
+        changeset: &'a ChangeSet,
+    ) -> FutureResult<'a, (), Self::Error>
     where
         Self: 'a,
     {
-        Box::pin(self.write(changeset))
+        Box::pin(store.write(changeset))
     }
 }
 
