@@ -9,6 +9,7 @@ thiserror = "1"
 tokio = { version = "1.39.2", features = ["full"] }
 
 [dependencies.bdk_wallet]
-path = "../bdk/crates/wallet"
-#git = "https://github.com/evanlinjin/bdk"
+#path = "../bdk/crates/wallet"
+git = "https://github.com/evanlinjin/bdk"
 #branch = "simplify_wallet_persistence"
+rev = "f434c93a788c6334319c40de7fe961113b9e415f"

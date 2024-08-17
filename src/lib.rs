@@ -1,9 +1,6 @@
 //! bdk-sqlx
 
-// #![allow(unused)]
-
 use std::collections::BTreeMap;
-use std::env;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -40,11 +37,10 @@ pub enum Error {
 
 impl Store {
     /// Construct a new [`Store`].
-    pub async fn new() -> Result<Self, Error> {
-        let url = env::var("DATABASE_URL").expect("must set DATABASE_URL");
+    pub async fn new(url: &str) -> Result<Self, Error> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
-            .connect(&url)
+            .connect(url)
             .await?;
 
         Ok(Self { pool })
