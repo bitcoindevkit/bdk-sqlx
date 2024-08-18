@@ -11,7 +11,7 @@ type Result<T, E = Box<dyn std::error::Error>> = core::result::Result<T, E>;
 async fn main() -> Result<()> {
     let url = std::env::var("DATABASE_URL").expect("must set DATABASE_URL");
 
-    let mut store = bdk_async_persist::Store::new(&url).await?;
+    let mut store = bdk_sqlx::Store::new(&url).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,

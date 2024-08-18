@@ -1,2 +1,1 @@
-# bdk-async-persist
-bdk-async-persist
+# bdk-sqlx
