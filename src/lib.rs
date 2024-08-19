@@ -1,21 +1,70 @@
-//! bdk-sqlx
 use bdk_wallet::bitcoin::consensus::Decodable;
-use std::str::FromStr;
-use bitcoin::Network;
-use bdk_wallet::descriptor::ExtendedDescriptor;
+use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
-use bdk_wallet::{bitcoin, ChangeSet};
-use bdk_wallet::chain::{Anchor, DescriptorExt, DescriptorId, keychain_txout, local_chain, tx_graph};
-use std::sync::Arc;
-
+use bdk_wallet::chain::{
+    keychain_txout, local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, Merge,
+};
+use bdk_wallet::descriptor::ExtendedDescriptor;
+use bdk_wallet::{bitcoin, AsyncWalletPersister, ChangeSet};
+use bitcoin::Network;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
 
-use bdk_wallet::chain::{Merge};
-use bdk_wallet::{AsyncWalletPersister};
-use sqlx::{PgPool, Postgres, Row, Transaction};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::FromRow;
+// ... (keeping other imports and struct definitions)
+/// Error.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("sqlx error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+}
+
+/// Store.
+#[derive(Debug)]
+pub struct Store {
+    pool: PgPool,
+    network: Network,
+}
+
+impl Store {
+    /// Construct a new [`Store`].
+    pub async fn new(url: &str, network: Network) -> Result<Self, Error> {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(url)
+            .await
+            .unwrap();
+
+        Ok(Self { pool, network })
+    }
+}
+impl AsyncWalletPersister for Store {
+    type Error = Error;
+
+    fn initialize<'a>(
+        store: &'a mut Self,
+        wallet_name: String,
+    ) -> FutureResult<'a, ChangeSet, Self::Error>
+    where
+        Self: 'a,
+    {
+        Box::pin(store.migrate_and_read(wallet_name))
+    }
+
+    fn persist<'a>(
+        store: &'a mut Self,
+        changeset: &'a ChangeSet,
+        wallet_name: String,
+    ) -> FutureResult<'a, (), Self::Error>
+    where
+        Self: 'a,
+    {
+        Box::pin(store.write(changeset, wallet_name))
+    }
+}
 
 type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
 
@@ -26,195 +75,171 @@ struct WalletRow {
     descriptor: String,
     last_revealed: i32,
 }
-
-/// Store.
-#[derive(Debug)]
-pub struct Store {
-    pool: PgPool,
-}
-
-/// Error.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("sqlx error: {0}")]
-    Sqlx(#[from] sqlx::Error),
-}
-
 impl Store {
-    /// Construct a new [`Store`].
-    pub async fn new(url: &str) -> Result<Self, Error> {
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(url)
-            .await?;
-
-        Ok(Self { pool })
-    }
-}
-
-impl AsyncWalletPersister for Store {
-    type Error = Error;
-
-    fn initialize<'a>(store: &'a mut Self) -> FutureResult<'a, ChangeSet, Self::Error>
-    where
-        Self: 'a,
-    {
-        Box::pin(store.migrate_and_read())
-    }
-
-    fn persist<'a>(
-        store: &'a mut Self,
-        changeset: &'a ChangeSet,
-    ) -> FutureResult<'a, (), Self::Error>
-    where
-        Self: 'a,
-    {
-        Box::pin(store.write(changeset))
-    }
-}
-
-impl Store {
-    /// Does schema migration and loads backend.
-    async fn migrate_and_read(&self) -> Result<ChangeSet, Error> {
+    async fn migrate_and_read(&self, wallet_name: String) -> Result<ChangeSet, Error> {
         let pool = &self.pool;
-        migrate(pool).await?;
+        // migrate(pool).await?;
 
-        // sqlx::migrate!("db/migrations").run(pool).await.unwrap();
+        sqlx::migrate!("db/migrations").run(pool).await.unwrap();
+
         let mut changeset = ChangeSet::default();
 
-        let row = match sqlx::query("SELECT network, descriptor, last_revealed FROM wallet LIMIT 1")
-            .fetch_optional(pool)
-            .await?
-        {
-            None => return Ok(changeset),
-            Some(row) => row,
-        };
+        let mut tx = pool.begin().await.unwrap();
 
-        let WalletRow {
+        // Fetch wallet data
+        let row = sqlx::query_as::<_, WalletRow>(
+            "SELECT n.name as network, k.descriptor, k.last_revealed 
+             FROM network n 
+             JOIN keychain k ON n.wallet_name = k.wallet_name 
+             LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        // .fetch_optional(&pool)
+        .await
+        .unwrap();
+
+        if let Some(WalletRow {
             network,
             descriptor,
             last_revealed,
-        } = <WalletRow as FromRow<_>>::from_row(&row)?;
+        }) = row
+        {
+            let (descriptor, _) =
+                ExtendedDescriptor::parse_descriptor(&Secp256k1::new(), &descriptor).unwrap();
+            let did = descriptor.descriptor_id();
+            changeset.descriptor = Some(descriptor);
+            changeset.network = Some(Network::from_str(&network).expect("must parse"));
+            changeset.indexer = keychain_txout::ChangeSet {
+                last_revealed: [(did, last_revealed as u32)].into(),
+            };
+        }
 
-        let (descriptor, _) =
-            <ExtendedDescriptor>::parse_descriptor(&Secp256k1::new(), &descriptor).unwrap();
-        let did = descriptor.descriptor_id();
-        changeset.descriptor = Some(descriptor);
-        let network = Network::from_str(&network).expect("must parse");
-        changeset.network = Some(network);
-        changeset.indexer = keychain_txout::ChangeSet {
-            last_revealed: [(did, last_revealed as u32)].into(),
-        };
+        changeset.tx_graph = tx_graph_changeset_from_postgres(&mut tx).await.unwrap();
+        changeset.local_chain = local_chain_changeset_from_postgres(&mut tx).await.unwrap();
+        // Note: keychain_txout ChangeSet is already set above
 
-        let mut tx = pool.try_begin().await?.unwrap();
-
-
-        changeset.tx_graph = tx_graph_changeset_from_postgres(&mut tx).await?;
-        changeset.local_chain = local_chain_changeset_from_postgres(&mut tx).await?;
-        changeset.indexer = keychain_txout_changeset_from_postgres(&mut tx).await?;
-
-        tx.commit().await?;
-
-        //
-        // // not implemented: tables for local_chain and tx_graph
-        // let genesis_hash = constants::genesis_block(network).block_hash();
-        // changeset.local_chain = local_chain::ChangeSet {
-        //     blocks: BTreeMap::from([(0, Some(genesis_hash))]),
-        // };
-        // changeset.tx_graph = tx_graph::ChangeSet::default();
+        tx.commit().await.unwrap();
 
         Ok(changeset)
     }
 
-    /// Inserts data into tables.
-    async fn write(&self, changeset: &ChangeSet) -> Result<(), Error> {
+    async fn write(&self, changeset: &ChangeSet, wallet_name: String) -> Result<(), Error> {
         if changeset.is_empty() {
             return Ok(());
         }
 
         let pool = &self.pool;
-        let mut tx = pool.try_begin().await?.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+
+        // let network = self.network;
+
+        // let descriptor = changeset.clone().descriptor.unwrap();
+        // let change_descriptor = changeset.clone().change_descriptor;
+        //
+        // let wallet_name = bdk_wallet::wallet_name_from_descriptor(descriptor,change_descriptor , network,&Secp256k1::new()).unwrap();
 
         if let Some(ref descriptor) = changeset.descriptor {
-            insert_descriptor(pool, descriptor).await?;
+            insert_descriptor(&mut tx, &wallet_name, descriptor)
+                .await
+                .unwrap();
         }
         if let Some(network) = changeset.network {
-            insert_network(pool, network).await?;
+            insert_network(&mut tx, &wallet_name, network)
+                .await
+                .unwrap();
         }
         if let Some(last_revealed) = changeset.indexer.last_revealed.values().next() {
-            insert_last_revealed(pool, *last_revealed).await?;
+            update_last_revealed(&mut tx, &wallet_name, *last_revealed)
+                .await
+                .unwrap();
         }
 
-        tx_graph_changeset_persist_to_postgres(&mut tx, &changeset.tx_graph).await?;
-        local_chain_changeset_persist_to_postgres(&mut tx, &changeset.local_chain).await?;
-        keychain_txout_changeset_persist_to_postgres(&mut tx, &changeset.indexer).await?;
+        tx_graph_changeset_persist_to_postgres(&mut tx, &wallet_name, &changeset.tx_graph)
+            .await
+            .unwrap();
+        local_chain_changeset_persist_to_postgres(&mut tx, &wallet_name, &changeset.local_chain)
+            .await
+            .unwrap();
+        // Note: keychain_txout ChangeSet is already handled above
 
-        tx.commit().await?;
+        tx.commit().await.unwrap();
 
         Ok(())
-
     }
 }
 
-async fn insert_descriptor(pool: &PgPool, descriptor: &ExtendedDescriptor) -> Result<(), Error> {
-    Ok(sqlx::query("INSERT INTO wallet(descriptor) VALUES($1)")
-        .bind(descriptor.to_string())
-        .execute(pool)
-        .await
-        .map(|_| ())?)
-}
+async fn insert_descriptor(
+    tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    descriptor: &ExtendedDescriptor,
+) -> Result<(), Error> {
+    let descriptor_str = descriptor.to_string();
+    let descriptor_id = descriptor.descriptor_id().to_byte_array();
+    let keychain = serde_json::to_value(descriptor).expect("Serialization should not fail");
 
-async fn insert_network(pool: &PgPool, network: Network) -> Result<(), Error> {
-    Ok(sqlx::query("UPDATE wallet SET network = $1")
-        .bind(network.to_string())
-        .execute(pool)
-        .await
-        .map(|_| ())?)
-}
-
-async fn insert_last_revealed(pool: &PgPool, last_revealed: u32) -> Result<(), Error> {
-    Ok(sqlx::query("UPDATE wallet SET last_revealed = $1")
-        .bind(last_revealed as i32)
-        .execute(pool)
-        .await
-        .map(|_| ())?)
-}
-
-async fn migrate(pool: &PgPool) -> Result<(), Error> {
-    let stmt = r#"
-CREATE TABLE IF NOT EXISTS wallet(
-    id SERIAL,
-    network VARCHAR(8),
-    descriptor VARCHAR(1024),
-    last_revealed INTEGER
-);
-"#;
-
-    let _ = sqlx::query(stmt).execute(pool).await?;
+    sqlx::query(
+        "INSERT INTO keychain (wallet_name, keychain, descriptor, descriptor_id)
+                    VALUES ($1, to_jsonb($2), $3, $4)",
+    )
+    .bind(wallet_name)
+    .bind(keychain)
+    .bind(descriptor_str)
+    .bind(descriptor_id.as_slice())
+    .execute(&mut **tx)
+    .await
+    .unwrap();
 
     Ok(())
 }
 
-pub async fn tx_graph_changeset_from_postgres<A>(
+async fn insert_network(
+    tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    network: Network,
+) -> Result<(), Error> {
+    sqlx::query("INSERT INTO network (wallet_name, name) VALUES ($1, $2)")
+        .bind(wallet_name)
+        .bind(network.to_string())
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+
+    Ok(())
+}
+
+async fn update_last_revealed(
+    tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    last_revealed: u32,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2")
+        .bind(last_revealed as i32)
+        .bind(wallet_name)
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+
+    Ok(())
+}
+
+pub async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
-) -> sqlx::Result<tx_graph::ChangeSet<A>>
-where
-    A: Anchor + Clone + Ord + serde::Serialize + serde::de::DeserializeOwned,
-{
+) -> sqlx::Result<tx_graph::ChangeSet<ConfirmationBlockTime>> {
     let mut changeset = tx_graph::ChangeSet::default();
 
     // Fetch transactions
-    let rows = sqlx::query("SELECT txid, raw_tx, last_seen FROM bdk_txs")
+    let rows = sqlx::query("SELECT txid, whole_tx, last_seen FROM tx")
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .unwrap();
 
     for row in rows {
         let txid: String = row.get("txid");
         let txid = bitcoin::Txid::from_str(&txid).expect("Invalid txid");
-        let raw_tx: Option<Vec<u8>> = row.get("raw_tx");
+        let whole_tx: Option<Vec<u8>> = row.get("whole_tx");
         let last_seen: Option<i64> = row.get("last_seen");
 
-        if let Some(tx_bytes) = raw_tx {
+        if let Some(tx_bytes) = whole_tx {
             if let Ok(tx) = bitcoin::Transaction::consensus_decode(&mut tx_bytes.as_slice()) {
                 changeset.txs.insert(Arc::new(tx));
             }
@@ -225,9 +250,10 @@ where
     }
 
     // Fetch txouts
-    let rows = sqlx::query("SELECT txid, vout, value, script FROM bdk_txouts")
+    let rows = sqlx::query("SELECT txid, vout, value, script FROM txout")
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .unwrap();
 
     for row in rows {
         let txid: String = row.get("txid");
@@ -249,16 +275,17 @@ where
     }
 
     // Fetch anchors
-    let rows = sqlx::query("SELECT anchor, txid FROM bdk_anchors")
+    let rows = sqlx::query("SELECT anchor, txid FROM anchor_tx")
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .unwrap();
 
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
         let txid: String = row.get("txid");
         let txid = bitcoin::Txid::from_str(&txid).expect("Invalid txid");
 
-        if let Ok(anchor) = serde_json::from_value::<A>(anchor) {
+        if let Ok(anchor) = serde_json::from_value::<ConfirmationBlockTime>(anchor) {
             changeset.anchors.insert((anchor, txid));
         }
     }
@@ -266,79 +293,80 @@ where
     Ok(changeset)
 }
 
-pub async fn tx_graph_changeset_persist_to_postgres<A>(
+pub async fn tx_graph_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
-    changeset: &tx_graph::ChangeSet<A>,
-) -> sqlx::Result<()>
-where
-    A: Anchor + Clone + Ord + serde::Serialize + serde::de::DeserializeOwned,
-{
+    wallet_name: &str,
+    changeset: &tx_graph::ChangeSet<ConfirmationBlockTime>,
+) -> sqlx::Result<()> {
     for tx in &changeset.txs {
         sqlx::query(
-            "INSERT INTO bdk_txs (txid, raw_tx) VALUES ($1, $2)
-             ON CONFLICT (txid) DO UPDATE SET raw_tx = $2",
+            "INSERT INTO tx (wallet_name, txid, whole_tx) VALUES ($1, $2, $3)
+             ON CONFLICT (wallet_name, txid) DO UPDATE SET whole_tx = $3",
         )
-            .bind(tx.compute_txid().to_string())
-            .bind(bitcoin::consensus::serialize(tx.as_ref()))
-            .execute(&mut **db_tx)
-            .await?;
+        .bind(wallet_name)
+        .bind(tx.compute_txid().to_string())
+        .bind(bitcoin::consensus::serialize(tx.as_ref()))
+        .execute(&mut **db_tx)
+        .await
+        .unwrap();
     }
 
     for (&txid, &last_seen) in &changeset.last_seen {
-        sqlx::query(
-            "INSERT INTO bdk_txs (txid, last_seen) VALUES ($1, $2)
-             ON CONFLICT (txid) DO UPDATE SET last_seen = $2",
-        )
-            .bind(txid.to_string())
+        sqlx::query("UPDATE tx SET last_seen = $1 WHERE wallet_name = $2 AND txid = $3")
             .bind(last_seen as i64)
+            .bind(wallet_name)
+            .bind(txid.to_string())
             .execute(&mut **db_tx)
-            .await?;
+            .await
+            .unwrap();
     }
 
     for (op, txo) in &changeset.txouts {
         sqlx::query(
-            "INSERT INTO bdk_txouts (txid, vout, value, script) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (txid, vout) DO UPDATE SET value = $3, script = $4",
+            "INSERT INTO txout (wallet_name, txid, vout, value, script) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (wallet_name, txid, vout) DO UPDATE SET value = $4, script = $5",
         )
-            .bind(op.txid.to_string())
-            .bind(op.vout as i32)
-            .bind(txo.value.to_sat() as i64)
-            .bind(txo.script_pubkey.as_bytes())
-            .execute(&mut **db_tx)
-            .await?;
+        .bind(wallet_name)
+        .bind(op.txid.to_string())
+        .bind(op.vout as i32)
+        .bind(txo.value.to_sat() as i64)
+        .bind(txo.script_pubkey.as_bytes())
+        .execute(&mut **db_tx)
+        .await
+        .unwrap();
     }
 
     for (anchor, txid) in &changeset.anchors {
         let anchor_block = anchor.anchor_block();
         sqlx::query(
-            "INSERT INTO bdk_anchors (txid, block_height, block_hash, anchor) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (txid, block_height, block_hash) DO UPDATE SET anchor = $4",
+            "INSERT INTO anchor_tx (wallet_name, block_hash, anchor, txid) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (wallet_name, anchor, txid) DO UPDATE SET block_hash = $2",
         )
-            .bind(txid.to_string())
-            .bind(anchor_block.height as i32)
-            .bind(anchor_block.hash.to_string())
-            .bind(serde_json::to_value(anchor).unwrap())
-            .execute(&mut **db_tx)
-            .await?;
+        .bind(wallet_name)
+        .bind(anchor_block.hash.to_string())
+        .bind(serde_json::to_value(anchor).unwrap())
+        .bind(txid.to_string())
+        .execute(&mut **db_tx)
+        .await
+        .unwrap();
     }
 
     Ok(())
 }
-
-// local_chain::ChangeSet functions
 
 pub async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
 ) -> sqlx::Result<local_chain::ChangeSet> {
     let mut changeset = local_chain::ChangeSet::default();
 
-    let rows = sqlx::query("SELECT block_height, block_hash FROM bdk_blocks")
+    let rows = sqlx::query("SELECT hash, height FROM block")
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .unwrap();
 
     for row in rows {
-        let height: i32 = row.get("block_height");
-        let hash: String = row.get("block_hash");
+        let hash: String = row.get("hash");
+        let height: i32 = row.get("height");
         if let Ok(block_hash) = bitcoin::BlockHash::from_str(&hash) {
             changeset.blocks.insert(height as u32, Some(block_hash));
         }
@@ -349,70 +377,32 @@ pub async fn local_chain_changeset_from_postgres(
 
 pub async fn local_chain_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
     changeset: &local_chain::ChangeSet,
 ) -> sqlx::Result<()> {
     for (&height, &hash) in &changeset.blocks {
         match hash {
             Some(hash) => {
                 sqlx::query(
-                    "INSERT INTO bdk_blocks (block_height, block_hash) VALUES ($1, $2)
-                     ON CONFLICT (block_height) DO UPDATE SET block_hash = $2",
+                    "INSERT INTO block (wallet_name, hash, height) VALUES ($1, $2, $3)
+                     ON CONFLICT (wallet_name, hash) DO UPDATE SET height = $3",
                 )
-                    .bind(height as i32)
-                    .bind(hash.to_string())
-                    .execute(&mut **db_tx)
-                    .await?;
+                .bind(wallet_name)
+                .bind(hash.to_string())
+                .bind(height as i32)
+                .execute(&mut **db_tx)
+                .await
+                .unwrap();
             }
             None => {
-                sqlx::query("DELETE FROM bdk_blocks WHERE block_height = $1")
+                sqlx::query("DELETE FROM block WHERE wallet_name = $1 AND height = $2")
+                    .bind(wallet_name)
                     .bind(height as i32)
                     .execute(&mut **db_tx)
-                    .await?;
+                    .await
+                    .unwrap();
             }
         }
-    }
-
-    Ok(())
-}
-
-// keychain_txout::ChangeSet functions
-
-pub async fn keychain_txout_changeset_from_postgres(
-    db_tx: &mut Transaction<'_, Postgres>,
-) -> sqlx::Result<keychain_txout::ChangeSet> {
-    let mut changeset = keychain_txout::ChangeSet::default();
-
-    let rows = sqlx::query("SELECT descriptor_id, last_revealed FROM bdk_descriptor_last_revealed")
-        .fetch_all(&mut **db_tx)
-        .await?;
-
-    for row in rows {
-        let descriptor_id: String = row.get("descriptor_id");
-        let last_revealed: i64 = row.get("last_revealed");
-
-        if let Ok(descriptor_id) = DescriptorId::from_str(&descriptor_id) {
-            changeset
-                .last_revealed
-                .insert(descriptor_id, last_revealed as u32);
-        }
-    }
-
-    Ok(changeset)
-}
-
-pub async fn keychain_txout_changeset_persist_to_postgres(
-    db_tx: &mut Transaction<'_, Postgres>,
-    changeset: &keychain_txout::ChangeSet,
-) -> sqlx::Result<()> {
-    for (&descriptor_id, &last_revealed) in &changeset.last_revealed {
-        sqlx::query(
-            "INSERT INTO bdk_descriptor_last_revealed (descriptor_id, last_revealed) VALUES ($1, $2)
-             ON CONFLICT (descriptor_id) DO UPDATE SET last_revealed = $2",
-        )
-            .bind(descriptor_id.to_string())
-            .bind(last_revealed as i64)
-            .execute(&mut **db_tx)
-            .await?;
     }
 
     Ok(())
