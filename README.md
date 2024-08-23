@@ -1,2 +1,1 @@
 # bdk-sqlx
-bdk-sqlx

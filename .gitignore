@@ -3,5 +3,4 @@ Cargo.lock
 
 .env
 
-*.sql
 *.db

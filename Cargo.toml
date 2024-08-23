@@ -1,0 +1,25 @@
+[package]
+name = "bdk-sqlx"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bdk_sqlx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "async_wallet_bdk_sqlx"
+path = "src/main.rs"
+
+[dependencies]
+sqlx = { version = "0.8.0", features = ["runtime-tokio-rustls","derive", "postgres", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
+thiserror = "1"
+tokio = { version = "1.39.2", features = ["full"] }
+serde = { version = "1.0.208", features = ["derive"] }
+serde_json = "1.0.125"
+better-panic = "0.3.0"
+
+[dependencies.bdk_wallet]
+path = "../bdk/crates/wallet"
+#git = "https://github.com/bitcoindevkit/bdk"
+#rev = "9e6ac72a630f378d3fa6d6b6cbfb763eedd3539a"
