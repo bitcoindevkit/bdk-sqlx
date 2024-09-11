@@ -12,14 +12,22 @@ name = "async_wallet_bdk_sqlx"
 path = "src/main.rs"
 
 [dependencies]
-sqlx = { version = "0.8.0", features = ["runtime-tokio-rustls","derive", "postgres", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
+sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring","derive", "postgres", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
 thiserror = "1"
-tokio = { version = "1.39.2", features = ["full"] }
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1.0.208", features = ["derive"] }
 serde_json = "1.0.125"
 better-panic = "0.3.0"
+rustls = "0.23.12"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde_json", "json"] }
+anyhow = "1.0.86"
+rand = "0.8.5"
+uuid = "1.10.0"
+assert_matches = "1.5.0"
+pg-embed = { version = "0.7.1", features = ["default"] }
 
-[dependencies.bdk_wallet]
-path = "../bdk/crates/wallet"
-#git = "https://github.com/bitcoindevkit/bdk"
-#rev = "9e6ac72a630f378d3fa6d6b6cbfb763eedd3539a"
+
+bdk_wallet = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2", features = ["std"], default-features = false }
+bdk_chain = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
+bdk_electrum = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
