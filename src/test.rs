@@ -16,6 +16,7 @@ pub fn get_test_tr_single_sig_xprv_with_change_desc() -> (&'static str, &'static
 }
 
 const NETWORK: Network = Signet;
+
 #[tracing::instrument]
 #[tokio::test]
 async fn wallet_is_persisted() -> anyhow::Result<()> {
@@ -95,10 +96,9 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
         println!("Recovered next address: {}", recovered_address.address);
 
         assert_eq!(
-        wallet.public_descriptor(KeychainKind::External).to_string(),
-        "tr(tpubD6NzVbkrYhZ4WgCeJid2Zds24zATB58r1q1qTLMuApUxZUxzETADNTeP6SvZKSsXs4qhvFAC21GFjXHwgxAcDtZqzzj8JMpsFDgqyjSJHGa/0/*)#celxt6vn".to_string()
-
-    );
+            wallet.public_descriptor(KeychainKind::External).to_string(),
+            "tr(tpubD6NzVbkrYhZ4WgCeJid2Zds24zATB58r1q1qTLMuApUxZUxzETADNTeP6SvZKSsXs4qhvFAC21GFjXHwgxAcDtZqzzj8JMpsFDgqyjSJHGa/0/*)#celxt6vn".to_string(),
+        );
     }
 
     // Clean up (optional, depending on your test database strategy)

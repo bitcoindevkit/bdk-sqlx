@@ -1,12 +1,22 @@
+//! bdk-sqlx
+
+#![warn(missing_docs)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use bdk_wallet::bitcoin::{self, consensus::Decodable, hashes::Hash, Network};
-use bdk_wallet::chain::{
+use bdk_chain::{
     local_chain, miniscript, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, Merge,
 };
+use bdk_wallet::bitcoin::{
+    self,
+    consensus::{self, Decodable},
+    hashes::Hash,
+    Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
+};
+use bdk_wallet::chain as bdk_chain;
 use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
 use bdk_wallet::KeychainKind::{External, Internal};
 use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
@@ -23,18 +33,24 @@ use tracing::info;
 #[cfg(test)]
 mod test;
 
-/// Error.
+/// Crate error
 #[derive(Debug, thiserror::Error)]
 pub enum BdkSqlxError {
+    /// bitcoin parse hex error
+    #[error("bitoin parse hex error: {0}")]
+    HexToArray(#[from] bitcoin::hex::HexToArrayError),
+    /// miniscript error
     #[error("miniscript error: {0}")]
     Miniscript(#[from] miniscript::Error),
+    /// serde_json error
     #[error("serde_json error: {0}")]
     SerdeJson(#[from] serde_json::error::Error),
+    /// sqlx error
     #[error("sqlx error: {0}")]
     Sqlx(#[from] sqlx::Error),
 }
 
-/// Store.
+/// Manages a pool of database connections.
 #[derive(Debug)]
 pub struct Store {
     pub(crate) pool: Arc<Mutex<Pool<Postgres>>>,
@@ -43,7 +59,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Construct a new [`Store`] with an existing pg connection
+    /// Construct a new [`Store`] with an existing pg connection.
     #[tracing::instrument]
     pub async fn new(
         pool: Arc<Mutex<Pool<Postgres>>>,
@@ -61,7 +77,7 @@ impl Store {
         })
     }
 
-    /// Construct a new [`Store`] without an existing pg connection
+    /// Construct a new [`Store`] without an existing pg connection.
     #[tracing::instrument]
     pub async fn new_with_url(
         url: String,
@@ -162,7 +178,7 @@ impl Store {
         let internal_desc_str: Option<String> = row.get("internal_descriptor");
         let external_desc_str: Option<String> = row.get("external_descriptor");
 
-        changeset.network = Some(Network::from_str(&network).expect("must parse"));
+        changeset.network = Some(Network::from_str(&network).expect("parse Network"));
 
         if let Some(desc_str) = external_desc_str {
             let descriptor: Descriptor<DescriptorPublicKey> = desc_str.parse()?;
@@ -234,6 +250,7 @@ impl Store {
     }
 }
 
+/// Insert keychain descriptors.
 #[tracing::instrument]
 async fn insert_descriptor(
     tx: &mut Transaction<'_, Postgres>,
@@ -263,6 +280,7 @@ async fn insert_descriptor(
     Ok(())
 }
 
+/// Insert network.
 #[tracing::instrument]
 async fn insert_network(
     tx: &mut Transaction<'_, Postgres>,
@@ -279,6 +297,7 @@ async fn insert_network(
     Ok(())
 }
 
+/// Update keychain last revealed
 #[tracing::instrument]
 async fn update_last_revealed(
     tx: &mut Transaction<'_, Postgres>,
@@ -303,6 +322,7 @@ async fn update_last_revealed(
     Ok(())
 }
 
+/// Select transactions, txouts, and anchors.
 #[tracing::instrument]
 pub async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
@@ -317,7 +337,7 @@ pub async fn tx_graph_changeset_from_postgres(
 
     for row in rows {
         let txid: String = row.get("txid");
-        let txid = bitcoin::Txid::from_str(&txid).expect("Invalid txid");
+        let txid = Txid::from_str(&txid)?;
         let whole_tx: Option<Vec<u8>> = row.get("whole_tx");
         let last_seen: Option<i64> = row.get("last_seen");
 
@@ -338,19 +358,19 @@ pub async fn tx_graph_changeset_from_postgres(
 
     for row in rows {
         let txid: String = row.get("txid");
-        let txid = bitcoin::Txid::from_str(&txid).expect("Invalid txid");
+        let txid = Txid::from_str(&txid)?;
         let vout: i32 = row.get("vout");
         let value: i64 = row.get("value");
         let script: Vec<u8> = row.get("script");
 
         changeset.txouts.insert(
-            bitcoin::OutPoint {
+            OutPoint {
                 txid,
                 vout: vout as u32,
             },
-            bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(value as u64),
-                script_pubkey: bitcoin::ScriptBuf::from(script),
+            TxOut {
+                value: Amount::from_sat(value as u64),
+                script_pubkey: ScriptBuf::from(script),
             },
         );
     }
@@ -363,7 +383,7 @@ pub async fn tx_graph_changeset_from_postgres(
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
         let txid: String = row.get("txid");
-        let txid = bitcoin::Txid::from_str(&txid).expect("Invalid txid");
+        let txid = Txid::from_str(&txid)?;
 
         if let Ok(anchor) = serde_json::from_value::<ConfirmationBlockTime>(anchor) {
             changeset.anchors.insert((anchor, txid));
@@ -373,6 +393,7 @@ pub async fn tx_graph_changeset_from_postgres(
     Ok(changeset)
 }
 
+/// Insert transactions, txouts, and anchors.
 #[tracing::instrument]
 pub async fn tx_graph_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
@@ -387,7 +408,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         )
         .bind(wallet_name)
         .bind(tx.compute_txid().to_string())
-        .bind(bitcoin::consensus::serialize(tx.as_ref()))
+        .bind(consensus::serialize(tx.as_ref()))
         .execute(&mut **db_tx)
         .await?;
     }
@@ -433,6 +454,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
     Ok(())
 }
 
+/// Select blocks.
 #[tracing::instrument]
 pub async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
@@ -447,14 +469,14 @@ pub async fn local_chain_changeset_from_postgres(
     for row in rows {
         let hash: String = row.get("hash");
         let height: i32 = row.get("height");
-        if let Ok(block_hash) = bitcoin::BlockHash::from_str(&hash) {
-            changeset.blocks.insert(height as u32, Some(block_hash));
-        }
+        let block_hash = BlockHash::from_str(&hash)?;
+        changeset.blocks.insert(height as u32, Some(block_hash));
     }
 
     Ok(changeset)
 }
 
+/// Insert blocks.
 #[tracing::instrument]
 pub async fn local_chain_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
@@ -488,6 +510,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
     Ok(())
 }
 
+/// Drops all tables.
 #[tracing::instrument]
 pub async fn drop_all(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
     info!("Dropping all tables");
@@ -521,6 +544,7 @@ pub async fn drop_all(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
     Ok(())
 }
 
+/// Represents a row in the keychain table.
 #[derive(serde::Serialize, FromRow)]
 struct KeychainEntry {
     wallet_name: String,
@@ -530,6 +554,7 @@ struct KeychainEntry {
     last_revealed: i32,
 }
 
+/// Collects information on all the wallets in the database and dumps it to stdout.
 #[tracing::instrument]
 pub async fn easy_backup(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
     info!("Starting easy backup");
