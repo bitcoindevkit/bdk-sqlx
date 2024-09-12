@@ -1,26 +1,25 @@
-use bdk_chain::DescriptorId;
-use bdk_wallet::bitcoin::{
-    self, consensus::Decodable, hashes::Hash, secp256k1::Secp256k1, Network,
-};
-use bdk_wallet::chain::{
-    keychain_txout, local_chain, miniscript, tx_graph, Anchor, ConfirmationBlockTime,
-    DescriptorExt, Merge,
-};
-use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
-use bdk_wallet::KeychainKind::{External, Internal};
-use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
-use sqlx::migrate::Migrator;
-use sqlx::postgres::PgRow;
-use sqlx::{postgres::{PgPool, PgPoolOptions, Postgres}, FromRow, Pool, Row, Transaction};
-use std::collections::{BTreeMap, HashMap};
-use std::env;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+
+use bdk_wallet::bitcoin::{self, consensus::Decodable, hashes::Hash, Network};
+use bdk_wallet::chain::{
+    local_chain, miniscript, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, Merge,
+};
+use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
+use bdk_wallet::KeychainKind::{External, Internal};
+use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
 use serde_json::json;
+use sqlx::migrate::Migrator;
+use sqlx::postgres::PgRow;
+use sqlx::{
+    postgres::{PgPool, Postgres},
+    FromRow, Pool, Row, Transaction,
+};
 use tokio::sync::Mutex;
 use tracing::info;
+
 mod tests;
 
 /// Error.
@@ -133,7 +132,6 @@ impl Store {
             LEFT JOIN keychain k_ext ON n.wallet_name = k_ext.wallet_name AND k_ext.keychainkind = 'External'
             WHERE n.wallet_name = $1";
 
-
         // Fetch wallet data
         let row = sqlx::query(sql)
             .bind(&self.wallet_name)
@@ -200,17 +198,24 @@ impl Store {
         let mut tx = pool.begin().await?;
 
         if let Some(ref descriptor) = changeset.descriptor {
-            let last_revealed = insert_descriptor(&mut tx, &wallet_name, descriptor, External).await?;
-            if let Some(last_revealed) =
-                changeset.indexer.last_revealed.get(&descriptor.descriptor_id()){
+            insert_descriptor(&mut tx, wallet_name, descriptor, External).await?;
+            if let Some(last_revealed) = changeset
+                .indexer
+                .last_revealed
+                .get(&descriptor.descriptor_id())
+            {
                 update_last_revealed(&mut tx, wallet_name, *last_revealed, External).await?;
             }
         }
 
         if let Some(ref change_descriptor) = changeset.clone().change_descriptor {
-            insert_descriptor(&mut tx, &wallet_name, change_descriptor, Internal).await?;
-            if let Some(last_revealed) = changeset.indexer.last_revealed.get(&change_descriptor.descriptor_id()){
-                update_last_revealed(&mut tx, wallet_name, *last_revealed,Internal).await?;
+            insert_descriptor(&mut tx, wallet_name, change_descriptor, Internal).await?;
+            if let Some(last_revealed) = changeset
+                .indexer
+                .last_revealed
+                .get(&change_descriptor.descriptor_id())
+            {
+                update_last_revealed(&mut tx, wallet_name, *last_revealed, Internal).await?;
             }
         }
 
@@ -278,19 +283,21 @@ async fn update_last_revealed(
     tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     last_revealed: u32,
-    keychain:KeychainKind
+    keychain: KeychainKind,
 ) -> Result<(), BdkSqlxError> {
     info!("update last revealed");
     let keychain = match keychain {
         External => "External",
         Internal => "Internal",
     };
-    sqlx::query("UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2 AND keychainkind = $3")
-        .bind(last_revealed as i32)
-        .bind(wallet_name)
-        .bind(keychain)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        "UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2 AND keychainkind = $3",
+    )
+    .bind(last_revealed as i32)
+    .bind(wallet_name)
+    .bind(keychain)
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }

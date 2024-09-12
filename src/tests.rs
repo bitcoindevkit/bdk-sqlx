@@ -7,10 +7,8 @@ mod tests {
     use bdk_chain::bitcoin::Network::Signet;
     use bdk_wallet::{wallet_name_from_descriptor, KeychainKind, Wallet};
     use better_panic::Settings;
-    use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
     use std::env;
-    use std::future::Future;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;

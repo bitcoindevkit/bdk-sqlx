@@ -1,20 +1,19 @@
-#![allow(unused)]
+// #![allow(unused)]
+use std::collections::HashSet;
+use std::io::Write;
 
 use bdk_electrum::{electrum_client, BdkElectrumClient};
 use bdk_sqlx::Store;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
-use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use better_panic::Settings;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::io::Write;
-// Create and persist a BDK wallet to an async storage backend.
 use rustls::crypto::ring::default_provider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+// Create and persist a BDK wallet to postgres.
 
 const DESC: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
 const NAME: &str = "au7pq8ux";
@@ -122,7 +121,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn electrum(mut wallet: &mut PersistedWallet<Store>) {
+fn electrum(wallet: &mut PersistedWallet<Store>) {
     let client = BdkElectrumClient::new(electrum_client::Client::new(ELECTRUM_URL).unwrap());
 
     // Populate the electrum client's transaction cache so it doesn't redownload transaction we
