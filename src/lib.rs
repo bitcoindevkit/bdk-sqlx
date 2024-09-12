@@ -20,7 +20,8 @@ use sqlx::{
 use tokio::sync::Mutex;
 use tracing::info;
 
-mod tests;
+#[cfg(test)]
+mod test;
 
 /// Error.
 #[derive(Debug, thiserror::Error)]
