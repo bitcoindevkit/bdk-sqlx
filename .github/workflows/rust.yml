@@ -1,18 +1,61 @@
-name: Rust
+name: CI
 
 on:
   push:
     branches: [ "master" ]
+  
   pull_request:
-    branches: [ "master" ]
+      types: [ opened, synchronize, reopened ]
+      branches:
+        - master
 
 env:
   CARGO_TERM_COLOR: auto
+  PGPASSWORD: password
+  DATABASE_TEST_URL: postgres://postgres:password@localhost:5432/testdb
 
 jobs:
-  build:
+  build-test:
+    name: Build + Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: postgres
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        # Map ports on service container to the host
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Create database
+        run: |
+          sudo apt-get install libpq-dev -y
+          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
+          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
+      - name: Test
+        run: cargo test -- --test-threads=1 --show-output
+
+  fmt-clippy:
+    name: Check
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Check
-      run: cargo check
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check fmt
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy -- -D warnings
