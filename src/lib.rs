@@ -8,7 +8,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use bdk_chain::{
-    local_chain, miniscript, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, Merge,
+    local_chain, miniscript, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId,
+    Merge,
 };
 use bdk_wallet::bitcoin::{
     self,
@@ -216,28 +217,21 @@ impl Store {
 
         if let Some(ref descriptor) = changeset.descriptor {
             insert_descriptor(&mut tx, wallet_name, descriptor, External).await?;
-            if let Some(last_revealed) = changeset
-                .indexer
-                .last_revealed
-                .get(&descriptor.descriptor_id())
-            {
-                update_last_revealed(&mut tx, wallet_name, *last_revealed, External).await?;
-            }
         }
 
-        if let Some(ref change_descriptor) = changeset.clone().change_descriptor {
+        if let Some(ref change_descriptor) = changeset.change_descriptor {
             insert_descriptor(&mut tx, wallet_name, change_descriptor, Internal).await?;
-            if let Some(last_revealed) = changeset
-                .indexer
-                .last_revealed
-                .get(&change_descriptor.descriptor_id())
-            {
-                update_last_revealed(&mut tx, wallet_name, *last_revealed, Internal).await?;
-            }
         }
 
         if let Some(network) = changeset.network {
             insert_network(&mut tx, wallet_name, network).await?;
+        }
+
+        let last_revealed_indices = &changeset.indexer.last_revealed;
+        if !last_revealed_indices.is_empty() {
+            for (desc_id, index) in last_revealed_indices {
+                update_last_revealed(&mut tx, wallet_name, *desc_id, *index).await?;
+            }
         }
 
         local_chain_changeset_persist_to_postgres(&mut tx, wallet_name, &changeset.local_chain)
@@ -302,20 +296,17 @@ async fn insert_network(
 async fn update_last_revealed(
     tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
+    descriptor_id: DescriptorId,
     last_revealed: u32,
-    keychain: KeychainKind,
 ) -> Result<(), BdkSqlxError> {
     info!("update last revealed");
-    let keychain = match keychain {
-        External => "External",
-        Internal => "Internal",
-    };
+
     sqlx::query(
-        "UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2 AND keychainkind = $3",
+        "UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2 AND descriptor_id = $3",
     )
     .bind(last_revealed as i32)
     .bind(wallet_name)
-    .bind(keychain)
+    .bind(descriptor_id.to_byte_array())
     .execute(&mut **tx)
     .await?;
 
