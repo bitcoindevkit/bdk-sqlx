@@ -31,3 +31,4 @@ pg-embed = { version = "0.7.1", features = ["default"] }
 bdk_wallet = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2", features = ["std"], default-features = false }
 bdk_chain = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
 bdk_electrum = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
+bdk_testenv = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
