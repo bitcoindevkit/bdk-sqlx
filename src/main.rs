@@ -88,7 +88,8 @@ async fn main() -> anyhow::Result<()> {
     let wallet_name =
         bdk_wallet::wallet_name_from_descriptor(VAULT_DESC, Some(CHANGE_DESC), NETWORK, &secp)?;
 
-    let mut store = bdk_sqlx::Store::new_with_url(url.clone(), Some(wallet_name)).await?;
+    let mut store =
+        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name)).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,

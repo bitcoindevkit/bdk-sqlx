@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod postgres;
+mod sqlite;
 
 #[cfg(test)]
 mod test;

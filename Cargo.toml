@@ -12,7 +12,7 @@ name = "async_wallet_bdk_sqlx"
 path = "src/main.rs"
 
 [dependencies]
-sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring","derive", "postgres", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
+sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring","derive", "postgres", "sqlite", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
 thiserror = "1"
 tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1.0.208", features = ["derive"] }
