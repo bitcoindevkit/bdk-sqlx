@@ -3,6 +3,7 @@ use crate::{drop_all, Store};
 use assert_matches::assert_matches;
 use bdk_chain::bitcoin::constants::ChainHash;
 use bdk_chain::bitcoin::hashes::Hash;
+use crate::{postgres::drop_all, Store};
 use bdk_chain::bitcoin::secp256k1::Secp256k1;
 use bdk_chain::bitcoin::Network::Signet;
 use bdk_chain::bitcoin::{BlockHash, Network};
@@ -18,8 +19,8 @@ use bdk_wallet::{
     LoadError, LoadMismatch, LoadWithPersistError, Wallet,
 };
 use better_panic::Settings;
-use sqlx::PgPool;
 use std::collections::HashSet;
+use sqlx::{PgPool, Postgres};
 use std::env;
 use std::io::Write;
 use std::time::Duration;
@@ -82,7 +83,7 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
     )?;
 
     // Create a new wallet
-    let mut store = Store::new_with_url(url.clone(), Some(wallet_name.clone())).await?;
+    let mut store = Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name.clone())).await?;
     let mut wallet = Wallet::create(external_desc, internal_desc)
         .network(NETWORK)
         .create_wallet_async(&mut store)
@@ -98,7 +99,7 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
 
     {
         // Recover the wallet
-        let mut store = Store::new_with_url(url.clone(), Some(wallet_name)).await?;
+        let mut store = Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name)).await?;
         let wallet = Wallet::load()
             .descriptor(External, Some(external_desc))
             .descriptor(Internal, Some(internal_desc))
