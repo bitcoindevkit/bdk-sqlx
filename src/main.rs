@@ -9,6 +9,7 @@ use bdk_wallet::bitcoin::Network;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use better_panic::Settings;
 use rustls::crypto::ring::default_provider;
+use sqlx::Postgres;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -59,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
         NETWORK,
         &secp,
     )?;
-    let mut store = bdk_sqlx::Store::new_with_url(url.clone(), Some(wallet_name)).await?;
+    let mut store =
+        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name)).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,
@@ -114,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn electrum(wallet: &mut PersistedWallet<Store>) -> anyhow::Result<()> {
+fn electrum(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()> {
     let client = BdkElectrumClient::new(electrum_client::Client::new(ELECTRUM_URL)?);
 
     // Populate the electrum client's transaction cache so it doesn't redownload transaction we

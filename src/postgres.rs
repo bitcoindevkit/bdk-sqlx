@@ -1,58 +1,105 @@
-//! bdk-sqlx
+//! bdk-sqlx postgres store
 
 #![warn(missing_docs)]
 
-mod postgres;
-
-#[cfg(test)]
-mod test;
-
-use std::future::Future;
-use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use bdk_chain::miniscript;
-use bdk_wallet::bitcoin;
+use super::{BdkSqlxError, FutureResult, Store};
+use bdk_chain::{
+    local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
+};
+use bdk_wallet::bitcoin::{
+    self,
+    consensus::{self, Decodable},
+    hashes::Hash,
+    Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
+};
 use bdk_wallet::chain as bdk_chain;
-
-use sqlx::Database;
-use sqlx::Pool;
+use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
+use bdk_wallet::KeychainKind::{External, Internal};
+use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
+use serde_json::json;
+use sqlx::migrate::Migrator;
+use sqlx::postgres::PgRow;
+use sqlx::{
+    postgres::{PgPool, Postgres},
+    FromRow, Pool, Row, Transaction,
+};
 use tokio::sync::Mutex;
+use tracing::info;
 
-/// Crate error
-#[derive(Debug, thiserror::Error)]
-pub enum BdkSqlxError {
-    /// bitcoin parse hex error
-    #[error("bitoin parse hex error: {0}")]
-    HexToArray(#[from] bitcoin::hex::HexToArrayError),
-    /// miniscript error
-    #[error("miniscript error: {0}")]
-    Miniscript(#[from] miniscript::Error),
-    /// serde_json error
-    #[error("serde_json error: {0}")]
-    SerdeJson(#[from] serde_json::error::Error),
-    /// sqlx error
-    #[error("sqlx error: {0}")]
-    Sqlx(#[from] sqlx::Error),
-}
+impl AsyncWalletPersister for Store<Postgres> {
+    type Error = BdkSqlxError;
 
-/// Manages a pool of database connections.
-#[derive(Debug)]
-pub struct Store<DB: Database> {
-    pub(crate) pool: Arc<Mutex<Pool<DB>>>,
-    wallet_name: String,
-    migration: bool,
-}
-
-type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
-
-impl Store {
     #[tracing::instrument]
-    async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
+    fn initialize<'a>(store: &'a mut Self) -> FutureResult<'a, ChangeSet, Self::Error>
+    where
+        Self: 'a,
+    {
+        info!("initialize store");
+        Box::pin(store.migrate_and_read())
+    }
+
+    #[tracing::instrument]
+    fn persist<'a>(
+        store: &'a mut Self,
+        changeset: &'a ChangeSet,
+    ) -> FutureResult<'a, (), Self::Error>
+    where
+        Self: 'a,
+    {
+        info!("persist store");
+        Box::pin(store.write(changeset))
+    }
+}
+
+impl Store<Postgres> {
+    /// Construct a new [`Store`] with an existing pg connection.
+    #[tracing::instrument]
+    pub async fn new(
+        pool: Arc<Mutex<Pool<Postgres>>>,
+        wallet_name: Option<String>,
+        migration: bool,
+    ) -> Result<Self, BdkSqlxError> {
+        info!("new store");
+
+        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_pg_wallet".to_string());
+
+        Ok(Self {
+            pool,
+            wallet_name,
+            migration,
+        })
+    }
+
+    /// Construct a new [`Store`] without an existing pg connection.
+    #[tracing::instrument]
+    pub async fn new_with_url(
+        url: String,
+        wallet_name: Option<String>,
+    ) -> Result<Store<Postgres>, BdkSqlxError> {
+        info!("new store with url");
+
+        let pool = PgPool::connect(url.as_str()).await?;
+        let pool = Arc::new(Mutex::new(pool));
+        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_pg_wallet".to_string());
+
+        Ok(Self {
+            pool,
+            wallet_name,
+            migration: true,
+        })
+    }
+}
+
+impl Store<Postgres> {
+    #[tracing::instrument]
+    pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
         let pool = self.pool.lock().await;
         if self.migration {
-            let migrator = Migrator::new(std::path::Path::new("./db/migrations/"))
+            let migrator = Migrator::new(std::path::Path::new("./migrations/postgres/"))
                 .await
                 .unwrap();
             migrator.run(&*pool).await.unwrap();
@@ -87,7 +134,7 @@ impl Store {
     }
 
     #[tracing::instrument]
-    async fn changeset_from_row(
+    pub(crate) async fn changeset_from_row(
         tx: &mut Transaction<'_, Postgres>,
         changeset: &mut ChangeSet,
         row: PgRow,
@@ -126,7 +173,7 @@ impl Store {
     }
 
     #[tracing::instrument]
-    async fn write(&self, changeset: &ChangeSet) -> Result<(), BdkSqlxError> {
+    pub(crate) async fn write(&self, changeset: &ChangeSet) -> Result<(), BdkSqlxError> {
         info!("changeset write");
         if changeset.is_empty() {
             return Ok(());
@@ -456,16 +503,6 @@ pub async fn drop_all(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
     Ok(())
 }
 
-/// Represents a row in the keychain table.
-#[derive(serde::Serialize, FromRow)]
-struct KeychainEntry {
-    wallet_name: String,
-    keychainkind: String,
-    descriptor: String,
-    descriptor_id: Vec<u8>,
-    last_revealed: i32,
-}
-
 /// Collects information on all the wallets in the database and dumps it to stdout.
 #[tracing::instrument]
 pub async fn easy_backup(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
@@ -482,4 +519,14 @@ pub async fn easy_backup(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
 
     info!("Easy backup completed successfully");
     Ok(())
+}
+
+/// Represents a row in the keychain table.
+#[derive(serde::Serialize, FromRow)]
+struct KeychainEntry {
+    wallet_name: String,
+    keychainkind: String,
+    descriptor: String,
+    descriptor_id: Vec<u8>,
+    last_revealed: i32,
 }

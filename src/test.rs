@@ -1,7 +1,7 @@
-use crate::{drop_all, Store};
 use assert_matches::assert_matches;
 use bdk_chain::bitcoin::constants::ChainHash;
 use bdk_chain::bitcoin::hashes::Hash;
+use crate::{postgres::drop_all, Store};
 use bdk_chain::bitcoin::secp256k1::Secp256k1;
 use bdk_chain::bitcoin::Network::Signet;
 use bdk_chain::bitcoin::{BlockHash, Network, Txid};
@@ -12,13 +12,15 @@ use bdk_electrum::{electrum_client, BdkElectrumClient};
 use bdk_testenv::bitcoincore_rpc::RpcApi;
 use bdk_testenv::TestEnv;
 use bdk_wallet::{
-    descriptor::ExtendedDescriptor, wallet_name_from_descriptor, KeychainKind, LoadError,
-    LoadMismatch, LoadWithPersistError, PersistedWallet, Wallet,
+    descriptor::ExtendedDescriptor,
+    wallet_name_from_descriptor,
+    KeychainKind::{self, *},
+    LoadError, LoadMismatch, LoadWithPersistError, PersistedWallet, Wallet,
 };
 use better_panic::Settings;
 use rustls::crypto::ring::default_provider;
-use sqlx::PgPool;
 use std::collections::HashSet;
+use sqlx::{PgPool, Postgres};
 use std::env;
 use std::io::Write;
 use std::time::Duration;
@@ -71,16 +73,9 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
 
     // Set up the database URL (you might want to use a test-specific database)
     let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
-
     let pg = PgPool::connect(&url.clone()).await?;
-    match drop_all(pg).await {
-        Ok(_) => {
-            dbg!("tables dropped")
-        }
-        Err(_) => {
-            dbg!("Error dropping tables")
-        }
-    };
+    drop_all(pg).await?;
+    println!("tables dropped");
 
     // Define descriptors (you may need to adjust these based on your exact requirements)
     let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_with_change_desc();
@@ -170,7 +165,7 @@ async fn create_and_scan_wallet(
     url: &str,
     external_desc: &str,
     internal_desc: &str,
-) -> anyhow::Result<(Store, String)> {
+) -> anyhow::Result<(Store<Postgres>, String)> {
     let wallet_name = wallet_name_from_descriptor(
         external_desc,
         Some(internal_desc),
@@ -188,7 +183,7 @@ async fn create_and_scan_wallet(
 }
 
 async fn load_wallet_and_get_transactions(
-    store: &mut Store,
+    store: &mut Store<Postgres>,
     external_desc: &str,
     internal_desc: &str,
 ) -> anyhow::Result<Vec<Txid>> {
@@ -219,6 +214,7 @@ async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
         .most_recent_first(false)
         .lineno_suffix(true)
         .install();
+
     default_provider()
         .install_default()
         .expect("Failed to install rustls default crypto provider");
@@ -260,7 +256,7 @@ async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn electrum_full_scan(wallet: &mut PersistedWallet<Store>) -> anyhow::Result<()> {
+async fn electrum_full_scan(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()> {
     let client = BdkElectrumClient::new(Client::new("ssl://mempool.space:60602").unwrap());
     client.populate_tx_cache(wallet.tx_graph().full_txs().map(|tx_node| tx_node.tx));
 
