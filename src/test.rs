@@ -20,10 +20,13 @@ use bdk_wallet::{
 use better_panic::Settings;
 use rustls::crypto::ring::default_provider;
 use std::collections::HashSet;
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgPool, Postgres, Sqlite, SqlitePool};
 use std::env;
 use std::io::Write;
 use std::time::Duration;
+use std::sync::Arc;
+use std::sync::Once;
+use tokio::sync::Mutex;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -56,20 +59,30 @@ fn parse_descriptor(s: &str) -> ExtendedDescriptor {
         .0
 }
 
+static INIT: Once = Once::new();
+
+// This must only be called once.
+pub fn initialize() {
+    INIT.call_once(|| {
+        tracing_subscriber::registry()
+            .with(EnvFilter::new(
+                env::var("RUST_LOG").unwrap_or_else(|_| "sqlx=warn,bdk_sqlx=info".into()),
+            ))
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+            .expect("setup tracing");
+    });
+}
+
 #[tracing::instrument]
 #[tokio::test]
-async fn wallet_is_persisted() -> anyhow::Result<()> {
+async fn wallet_is_persisted_postgres() -> anyhow::Result<()> {
     Settings::debug()
         .most_recent_first(false)
         .lineno_suffix(true)
         .install();
 
-    tracing_subscriber::registry()
-        .with(EnvFilter::new(
-            env::var("RUST_LOG").unwrap_or_else(|_| "sqlx=warn,bdk_postgres=info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .try_init()?;
+    initialize();
 
     // Set up the database URL (you might want to use a test-specific database)
     let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
@@ -603,6 +616,83 @@ async fn sync_with_electrum() -> anyhow::Result<()> {
 
     let db = PgPool::connect(&url).await?;
     drop_all(db).await.expect("hope its not mainnet");
+
+    Ok(())
+}
+
+// This test uses the in-memory sqlite DB so tables don't need to be dropped at the end.
+#[tracing::instrument]
+#[tokio::test]
+async fn wallet_is_persisted_sqlite() -> anyhow::Result<()> {
+    Settings::debug()
+        .most_recent_first(false)
+        .lineno_suffix(true)
+        .install();
+
+    initialize();
+
+    // Set up the database URL (you might want to use a test-specific database)
+    let pool = SqlitePool::connect(":memory:").await?;
+
+    // Define descriptors (you may need to adjust these based on your exact requirements)
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_with_change_desc();
+    // Generate a unique name for this test wallet
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    // Create a new wallet, use sqlite in memory DB
+    let mut store = Store::<Sqlite>::new(
+        Arc::new(Mutex::new(pool.clone())),
+        Some(wallet_name.clone()),
+        true,
+    )
+    .await?;
+    let mut wallet = Wallet::create(external_desc, internal_desc)
+        .network(NETWORK)
+        .create_wallet_async(&mut store)
+        .await?;
+
+    let external_addr0 = wallet.reveal_next_address(KeychainKind::External);
+    for keychain in [External, Internal] {
+        let _ = wallet.reveal_addresses_to(keychain, 2);
+    }
+
+    assert!(wallet.persist_async(&mut store).await?);
+    let wallet_spk_index = wallet.spk_index();
+
+    {
+        // Recover the wallet
+        let mut store =
+            Store::<Sqlite>::new(Arc::new(Mutex::new(pool)), Some(wallet_name), false).await?;
+        let wallet = Wallet::load()
+            .descriptor(KeychainKind::External, Some(external_desc))
+            .descriptor(KeychainKind::Internal, Some(internal_desc))
+            .load_wallet_async(&mut store)
+            .await?
+            .expect("wallet must exist");
+
+        assert_eq!(wallet.network(), NETWORK);
+        assert_eq!(
+            wallet.spk_index().keychains().collect::<Vec<_>>(),
+            wallet_spk_index.keychains().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            wallet.spk_index().last_revealed_indices(),
+            wallet_spk_index.last_revealed_indices()
+        );
+
+        let recovered_addr = wallet.peek_address(KeychainKind::External, 0);
+        assert_eq!(recovered_addr, external_addr0, "failed to recover address");
+
+        assert_eq!(
+            wallet.public_descriptor(KeychainKind::External).to_string(),
+            "tr(tpubD6NzVbkrYhZ4WgCeJid2Zds24zATB58r1q1qTLMuApUxZUxzETADNTeP6SvZKSsXs4qhvFAC21GFjXHwgxAcDtZqzzj8JMpsFDgqyjSJHGa/0/*)#celxt6vn".to_string(),
+        );
+    }
 
     Ok(())
 }

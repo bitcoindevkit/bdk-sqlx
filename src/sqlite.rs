@@ -1,59 +1,121 @@
-//! bdk-sqlx
+//! bdk-sqlx sqlite store
 
 #![warn(missing_docs)]
 
-mod postgres;
-mod sqlite;
-
-#[cfg(test)]
-mod test;
-
-use std::future::Future;
-use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use bdk_chain::miniscript;
-use bdk_wallet::bitcoin;
+use super::{BdkSqlxError, FutureResult, Store};
+use bdk_chain::{
+    local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
+};
+use bdk_wallet::bitcoin::{
+    self,
+    consensus::{self, Decodable},
+    hashes::Hash,
+    Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
+};
 use bdk_wallet::chain as bdk_chain;
-
-use sqlx::Database;
-use sqlx::Pool;
+use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
+use bdk_wallet::KeychainKind::{External, Internal};
+use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
+use serde_json::json;
+use sqlx::sqlite::SqliteRow;
+use sqlx::{
+    migrate::Migrator,
+    sqlite::{SqlitePool, SqlitePoolOptions},
+};
+use sqlx::{sqlite::Sqlite, FromRow, Pool, Row, Transaction};
 use tokio::sync::Mutex;
+use tracing::info;
 
-/// Crate error
-#[derive(Debug, thiserror::Error)]
-pub enum BdkSqlxError {
-    /// bitcoin parse hex error
-    #[error("bitoin parse hex error: {0}")]
-    HexToArray(#[from] bitcoin::hex::HexToArrayError),
-    /// miniscript error
-    #[error("miniscript error: {0}")]
-    Miniscript(#[from] miniscript::Error),
-    /// serde_json error
-    #[error("serde_json error: {0}")]
-    SerdeJson(#[from] serde_json::error::Error),
-    /// sqlx error
-    #[error("sqlx error: {0}")]
-    Sqlx(#[from] sqlx::Error),
-}
+impl AsyncWalletPersister for Store<Sqlite> {
+    type Error = BdkSqlxError;
 
-/// Manages a pool of database connections.
-#[derive(Debug)]
-pub struct Store<DB: Database> {
-    pub(crate) pool: Arc<Mutex<Pool<DB>>>,
-    wallet_name: String,
-    migration: bool,
-}
-
-type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
-
-impl Store {
     #[tracing::instrument]
-    async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
+    fn initialize<'a>(store: &'a mut Self) -> FutureResult<'a, ChangeSet, Self::Error>
+    where
+        Self: 'a,
+    {
+        info!("initialize store");
+        Box::pin(store.migrate_and_read())
+    }
+
+    #[tracing::instrument]
+    fn persist<'a>(
+        store: &'a mut Self,
+        changeset: &'a ChangeSet,
+    ) -> FutureResult<'a, (), Self::Error>
+    where
+        Self: 'a,
+    {
+        info!("persist store");
+        Box::pin(store.write(changeset))
+    }
+}
+
+impl Store<Sqlite> {
+    /// Construct a new [`Store`] with an existing sqlite connection.
+    #[tracing::instrument]
+    pub async fn new(
+        pool: Arc<Mutex<Pool<Sqlite>>>,
+        wallet_name: Option<String>,
+        migration: bool,
+    ) -> Result<Self, BdkSqlxError> {
+        info!("new store");
+
+        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_sqlites_wallet".to_string());
+
+        Ok(Self {
+            pool,
+            wallet_name,
+            migration,
+        })
+    }
+
+    /// Construct a new [`Store`] without an existing sqlite connection.
+    ///
+    /// The SQLite DB URL should look like "sqlite://bdk_wallet.sqlite?mode=rwc".
+    ///
+    /// If no URL is given a memory DB (non-persisted) will be used. A memory DB
+    /// is useful for testing.
+    #[tracing::instrument]
+    pub async fn new_with_url(
+        url: Option<String>,
+        wallet_name: Option<String>,
+    ) -> Result<Store<Sqlite>, BdkSqlxError> {
+        info!("new store with url");
+
+        let pool = if let Some(url) = url {
+            SqlitePool::connect(url.as_str()).await?
+        } else {
+            // must limit to one connection and no timeout if using memory DB
+            SqlitePoolOptions::new()
+                .max_connections(1)
+                .min_connections(1)
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .connect(":memory:")
+                .await?
+        };
+        let pool = Arc::new(Mutex::new(pool));
+        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_sqlite_wallet".to_string());
+
+        Ok(Self {
+            pool,
+            wallet_name,
+            migration: true,
+        })
+    }
+}
+
+impl Store<Sqlite> {
+    #[tracing::instrument]
+    pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
         let pool = self.pool.lock().await;
         if self.migration {
-            let migrator = Migrator::new(std::path::Path::new("./db/migrations/"))
+            let migrator = Migrator::new(std::path::Path::new("./migrations/sqlite/"))
                 .await
                 .unwrap();
             migrator.run(&*pool).await.unwrap();
@@ -78,7 +140,7 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?;
 
-        dbg!(&row);
+        //dbg!(&row);
 
         if let Some(row) = row {
             Self::changeset_from_row(&mut tx, &mut changeset, row).await?;
@@ -87,11 +149,11 @@ impl Store {
         Ok(changeset)
     }
 
-    #[tracing::instrument]
-    async fn changeset_from_row(
-        tx: &mut Transaction<'_, Postgres>,
+    //#[tracing::instrument]
+    pub(crate) async fn changeset_from_row(
+        tx: &mut Transaction<'_, Sqlite>,
         changeset: &mut ChangeSet,
-        row: PgRow,
+        row: SqliteRow,
     ) -> Result<(), BdkSqlxError> {
         info!("changeset from row");
 
@@ -121,13 +183,13 @@ impl Store {
             }
         }
 
-        changeset.tx_graph = tx_graph_changeset_from_postgres(tx).await?;
-        changeset.local_chain = local_chain_changeset_from_postgres(tx).await?;
+        changeset.tx_graph = tx_graph_changeset_from_sqlite(tx).await?;
+        changeset.local_chain = local_chain_changeset_from_sqlite(tx).await?;
         Ok(())
     }
 
     #[tracing::instrument]
-    async fn write(&self, changeset: &ChangeSet) -> Result<(), BdkSqlxError> {
+    pub(crate) async fn write(&self, changeset: &ChangeSet) -> Result<(), BdkSqlxError> {
         info!("changeset write");
         if changeset.is_empty() {
             return Ok(());
@@ -156,9 +218,9 @@ impl Store {
             }
         }
 
-        local_chain_changeset_persist_to_postgres(&mut tx, wallet_name, &changeset.local_chain)
+        local_chain_changeset_persist_to_sqlite(&mut tx, wallet_name, &changeset.local_chain)
             .await?;
-        tx_graph_changeset_persist_to_postgres(&mut tx, wallet_name, &changeset.tx_graph).await?;
+        tx_graph_changeset_persist_to_sqlite(&mut tx, wallet_name, &changeset.tx_graph).await?;
 
         tx.commit().await?;
 
@@ -169,7 +231,7 @@ impl Store {
 /// Insert keychain descriptors.
 #[tracing::instrument]
 async fn insert_descriptor(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     descriptor: &ExtendedDescriptor,
     keychain: KeychainKind,
@@ -199,7 +261,7 @@ async fn insert_descriptor(
 /// Insert network.
 #[tracing::instrument]
 async fn insert_network(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     network: Network,
 ) -> Result<(), BdkSqlxError> {
@@ -216,19 +278,19 @@ async fn insert_network(
 /// Update keychain last revealed
 #[tracing::instrument]
 async fn update_last_revealed(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     descriptor_id: DescriptorId,
     last_revealed: u32,
 ) -> Result<(), BdkSqlxError> {
     info!("update last revealed");
 
-    sqlx::query(
+    sqlx::query::<Sqlite>(
         "UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2 AND descriptor_id = $3",
     )
     .bind(last_revealed as i32)
     .bind(wallet_name)
-    .bind(descriptor_id.to_byte_array())
+    .bind(descriptor_id.to_byte_array().as_slice())
     .execute(&mut **tx)
     .await?;
 
@@ -237,10 +299,10 @@ async fn update_last_revealed(
 
 /// Select transactions, txouts, and anchors.
 #[tracing::instrument]
-pub async fn tx_graph_changeset_from_postgres(
-    db_tx: &mut Transaction<'_, Postgres>,
+pub async fn tx_graph_changeset_from_sqlite(
+    db_tx: &mut Transaction<'_, Sqlite>,
 ) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>, BdkSqlxError> {
-    info!("tx graph changeset from postgres");
+    info!("tx graph changeset from sqlite");
     let mut changeset = tx_graph::ChangeSet::default();
 
     // Fetch transactions
@@ -289,7 +351,7 @@ pub async fn tx_graph_changeset_from_postgres(
     }
 
     // Fetch anchors
-    let rows = sqlx::query("SELECT anchor, txid FROM anchor_tx")
+    let rows = sqlx::query("SELECT json(anchor) as anchor, txid FROM anchor_tx")
         .fetch_all(&mut **db_tx)
         .await?;
 
@@ -308,12 +370,12 @@ pub async fn tx_graph_changeset_from_postgres(
 
 /// Insert transactions, txouts, and anchors.
 #[tracing::instrument]
-pub async fn tx_graph_changeset_persist_to_postgres(
-    db_tx: &mut Transaction<'_, Postgres>,
+pub async fn tx_graph_changeset_persist_to_sqlite(
+    db_tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     changeset: &tx_graph::ChangeSet<ConfirmationBlockTime>,
 ) -> Result<(), BdkSqlxError> {
-    info!("tx graph changeset from postgres");
+    info!("tx graph changeset from sqlite");
     for tx in &changeset.txs {
         sqlx::query(
             "INSERT INTO tx (wallet_name, txid, whole_tx) VALUES ($1, $2, $3)
@@ -353,8 +415,8 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         let block_hash = anchor.anchor_block().hash;
         let anchor = serde_json::to_value(anchor)?;
         sqlx::query(
-            "INSERT INTO anchor_tx (wallet_name, block_hash, anchor, txid) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (wallet_name, block_hash, txid) DO UPDATE SET anchor = $3",
+            "INSERT INTO anchor_tx (wallet_name, block_hash, anchor, txid) VALUES ($1, $2, jsonb($3), $4)
+             ON CONFLICT (wallet_name, block_hash, txid) DO UPDATE SET anchor = jsonb($3)",
         )
         .bind(wallet_name)
         .bind(block_hash.to_string())
@@ -369,10 +431,10 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 
 /// Select blocks.
 #[tracing::instrument]
-pub async fn local_chain_changeset_from_postgres(
-    db_tx: &mut Transaction<'_, Postgres>,
+pub async fn local_chain_changeset_from_sqlite(
+    db_tx: &mut Transaction<'_, Sqlite>,
 ) -> Result<local_chain::ChangeSet, BdkSqlxError> {
-    info!("local chain changeset from postgres");
+    info!("local chain changeset from sqlite");
     let mut changeset = local_chain::ChangeSet::default();
 
     let rows = sqlx::query("SELECT hash, height FROM block")
@@ -391,12 +453,12 @@ pub async fn local_chain_changeset_from_postgres(
 
 /// Insert blocks.
 #[tracing::instrument]
-pub async fn local_chain_changeset_persist_to_postgres(
-    db_tx: &mut Transaction<'_, Postgres>,
+pub async fn local_chain_changeset_persist_to_sqlite(
+    db_tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     changeset: &local_chain::ChangeSet,
 ) -> Result<(), BdkSqlxError> {
-    info!("local chain changeset to postgres");
+    info!("local chain changeset to sqlite");
     for (&height, &hash) in &changeset.blocks {
         match hash {
             Some(hash) => {
@@ -423,53 +485,9 @@ pub async fn local_chain_changeset_persist_to_postgres(
     Ok(())
 }
 
-/// Drops all tables.
-#[tracing::instrument]
-pub async fn drop_all(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
-    info!("Dropping all tables");
-
-    let drop_statements = vec![
-        "DROP TABLE IF EXISTS _sqlx_migrations",
-        "DROP TABLE IF EXISTS vault_addresses",
-        "DROP TABLE IF EXISTS used_anchorwatch_keys",
-        "DROP TABLE IF EXISTS anchorwatch_keys",
-        "DROP TABLE IF EXISTS psbts",
-        "DROP TABLE IF EXISTS whitelist_update",
-        "DROP TABLE IF EXISTS vault_parameters",
-        "DROP TABLE IF EXISTS users",
-        "DROP TABLE IF EXISTS version",
-        "DROP TABLE IF EXISTS anchor_tx",
-        "DROP TABLE IF EXISTS txout",
-        "DROP TABLE IF EXISTS tx",
-        "DROP TABLE IF EXISTS block",
-        "DROP TABLE IF EXISTS keychain",
-        "DROP TABLE IF EXISTS network",
-    ];
-
-    let mut tx = db.begin().await?;
-
-    for statement in drop_statements {
-        sqlx::query(statement).execute(&mut *tx).await?;
-    }
-
-    tx.commit().await?;
-
-    Ok(())
-}
-
-/// Represents a row in the keychain table.
-#[derive(serde::Serialize, FromRow)]
-struct KeychainEntry {
-    wallet_name: String,
-    keychainkind: String,
-    descriptor: String,
-    descriptor_id: Vec<u8>,
-    last_revealed: i32,
-}
-
 /// Collects information on all the wallets in the database and dumps it to stdout.
 #[tracing::instrument]
-pub async fn easy_backup(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
+pub async fn easy_backup(db: Pool<Sqlite>) -> Result<(), BdkSqlxError> {
     info!("Starting easy backup");
 
     let statement = "SELECT * FROM keychain";
@@ -483,4 +501,14 @@ pub async fn easy_backup(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
 
     info!("Easy backup completed successfully");
     Ok(())
+}
+
+/// Represents a row in the keychain table.
+#[derive(serde::Serialize, FromRow)]
+struct KeychainEntry {
+    wallet_name: String,
+    keychainkind: String,
+    descriptor: String,
+    descriptor_id: Vec<u8>,
+    last_revealed: i32,
 }
