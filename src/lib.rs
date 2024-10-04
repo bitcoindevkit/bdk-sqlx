@@ -10,7 +10,6 @@ mod test;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use bdk_chain::miniscript;
 use bdk_wallet::bitcoin;
@@ -18,7 +17,6 @@ use bdk_wallet::chain as bdk_chain;
 
 use sqlx::Database;
 use sqlx::Pool;
-use tokio::sync::Mutex;
 
 /// Crate error
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +38,7 @@ pub enum BdkSqlxError {
 /// Manages a pool of database connections.
 #[derive(Debug)]
 pub struct Store<DB: Database> {
-    pub(crate) pool: Arc<Mutex<Pool<DB>>>,
+    pub(crate) pool: Pool<DB>,
     wallet_name: String,
     migration: bool,
 }
