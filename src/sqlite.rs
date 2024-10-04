@@ -26,7 +26,6 @@ use sqlx::{
     sqlite::{SqlitePool, SqlitePoolOptions},
 };
 use sqlx::{sqlite::Sqlite, FromRow, Pool, Row, Transaction};
-use tokio::sync::Mutex;
 use tracing::info;
 
 impl AsyncWalletPersister for Store<Sqlite> {
@@ -58,7 +57,7 @@ impl Store<Sqlite> {
     /// Construct a new [`Store`] with an existing sqlite connection.
     #[tracing::instrument]
     pub async fn new(
-        pool: Arc<Mutex<Pool<Sqlite>>>,
+        pool: Pool<Sqlite>,
         wallet_name: Option<String>,
         migration: bool,
     ) -> Result<Self, BdkSqlxError> {
@@ -98,7 +97,6 @@ impl Store<Sqlite> {
                 .connect(":memory:")
                 .await?
         };
-        let pool = Arc::new(Mutex::new(pool));
         let wallet_name = wallet_name.unwrap_or_else(|| "bdk_sqlite_wallet".to_string());
 
         Ok(Self {
@@ -113,15 +111,14 @@ impl Store<Sqlite> {
     #[tracing::instrument]
     pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
-        let pool = self.pool.lock().await;
         if self.migration {
             let migrator = Migrator::new(std::path::Path::new("./migrations/sqlite/"))
                 .await
                 .unwrap();
-            migrator.run(&*pool).await.unwrap();
+            migrator.run(&self.pool).await.unwrap();
         }
 
-        let mut tx = pool.begin().await?;
+        let mut tx = self.pool.begin().await?;
 
         let mut changeset = ChangeSet::default();
 
@@ -196,8 +193,7 @@ impl Store<Sqlite> {
         }
 
         let wallet_name = &self.wallet_name;
-        let pool = self.pool.lock().await;
-        let mut tx = pool.begin().await?;
+        let mut tx = self.pool.begin().await?;
 
         if let Some(ref descriptor) = changeset.descriptor {
             insert_descriptor(&mut tx, wallet_name, descriptor, External).await?;

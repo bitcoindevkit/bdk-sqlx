@@ -26,7 +26,6 @@ use std::io::Write;
 use std::time::Duration;
 use std::sync::Arc;
 use std::sync::Once;
-use tokio::sync::Mutex;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -645,12 +644,7 @@ async fn wallet_is_persisted_sqlite() -> anyhow::Result<()> {
     )?;
 
     // Create a new wallet, use sqlite in memory DB
-    let mut store = Store::<Sqlite>::new(
-        Arc::new(Mutex::new(pool.clone())),
-        Some(wallet_name.clone()),
-        true,
-    )
-    .await?;
+    let mut store = Store::<Sqlite>::new(pool.clone(), Some(wallet_name.clone()), true).await?;
     let mut wallet = Wallet::create(external_desc, internal_desc)
         .network(NETWORK)
         .create_wallet_async(&mut store)
@@ -666,8 +660,7 @@ async fn wallet_is_persisted_sqlite() -> anyhow::Result<()> {
 
     {
         // Recover the wallet
-        let mut store =
-            Store::<Sqlite>::new(Arc::new(Mutex::new(pool)), Some(wallet_name), false).await?;
+        let mut store = Store::<Sqlite>::new(pool, Some(wallet_name), false).await?;
         let wallet = Wallet::load()
             .descriptor(KeychainKind::External, Some(external_desc))
             .descriptor(KeychainKind::Internal, Some(internal_desc))
