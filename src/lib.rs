@@ -36,7 +36,7 @@ pub enum BdkSqlxError {
 }
 
 /// Manages a pool of database connections.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store<DB: Database> {
     pub(crate) pool: Pool<DB>,
     wallet_name: String,
