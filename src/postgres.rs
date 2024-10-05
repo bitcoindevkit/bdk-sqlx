@@ -121,8 +121,6 @@ impl Store<Postgres> {
             .fetch_optional(&mut *tx)
             .await?;
 
-        dbg!(&row);
-
         if let Some(row) = row {
             Self::changeset_from_row(&mut tx, &mut changeset, row).await?;
         }
@@ -461,40 +459,6 @@ pub async fn local_chain_changeset_persist_to_postgres(
             }
         }
     }
-
-    Ok(())
-}
-
-/// Drops all tables.
-#[tracing::instrument]
-pub async fn drop_all(db: Pool<Postgres>) -> Result<(), BdkSqlxError> {
-    info!("Dropping all tables");
-
-    let drop_statements = vec![
-        "DROP TABLE IF EXISTS _sqlx_migrations",
-        "DROP TABLE IF EXISTS vault_addresses",
-        "DROP TABLE IF EXISTS used_anchorwatch_keys",
-        "DROP TABLE IF EXISTS anchorwatch_keys",
-        "DROP TABLE IF EXISTS psbts",
-        "DROP TABLE IF EXISTS whitelist_update",
-        "DROP TABLE IF EXISTS vault_parameters",
-        "DROP TABLE IF EXISTS users",
-        "DROP TABLE IF EXISTS version",
-        "DROP TABLE IF EXISTS anchor_tx",
-        "DROP TABLE IF EXISTS txout",
-        "DROP TABLE IF EXISTS tx",
-        "DROP TABLE IF EXISTS block",
-        "DROP TABLE IF EXISTS keychain",
-        "DROP TABLE IF EXISTS network",
-    ];
-
-    let mut tx = db.begin().await?;
-
-    for statement in drop_statements {
-        sqlx::query(statement).execute(&mut *tx).await?;
-    }
-
-    tx.commit().await?;
 
     Ok(())
 }
