@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use bdk_electrum::{electrum_client, BdkElectrumClient};
+use bdk_sqlx::sqlx::Postgres;
 use bdk_sqlx::Store;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use better_panic::Settings;
 use rustls::crypto::ring::default_provider;
-use sqlx::Postgres;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
     default_provider()
         .install_default()
         .expect("Failed to install rustls default crypto provider");
+
     Settings::debug()
         .most_recent_first(false)
         .lineno_suffix(true)
@@ -120,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
 fn electrum(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()> {
     let client = BdkElectrumClient::new(electrum_client::Client::new(ELECTRUM_URL)?);
 
-    // Populate the electrum client's transaction cache so it doesn't redownload transaction we
+    // Populate the electrum client's transaction cache so it doesn't re-download transaction we
     // already have.
     client.populate_tx_cache(wallet.tx_graph().full_txs().map(|tx_node| tx_node.tx));
 

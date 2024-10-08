@@ -21,10 +21,8 @@ use bdk_wallet::KeychainKind::{External, Internal};
 use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
 use serde_json::json;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{
-    migrate::Migrator,
-    sqlite::{SqlitePool, SqlitePoolOptions},
-};
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlx_macros::migrate;
 use sqlx::{sqlite::Sqlite, FromRow, Pool, Row, Transaction};
 use tracing::info;
 
@@ -112,10 +110,7 @@ impl Store<Sqlite> {
     pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
         if self.migration {
-            let migrator = Migrator::new(std::path::Path::new("./migrations/sqlite/"))
-                .await
-                .unwrap();
-            migrator.run(&self.pool).await.unwrap();
+            migrate!("./migrations/sqlite/").run(&self.pool).await?;
         }
 
         let mut tx = self.pool.begin().await?;

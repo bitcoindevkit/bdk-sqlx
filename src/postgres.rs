@@ -20,8 +20,8 @@ use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor
 use bdk_wallet::KeychainKind::{External, Internal};
 use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
 use serde_json::json;
-use sqlx::migrate::Migrator;
 use sqlx::postgres::PgRow;
+use sqlx::sqlx_macros::migrate;
 use sqlx::{
     postgres::{PgPool, Postgres},
     FromRow, Pool, Row, Transaction,
@@ -96,10 +96,7 @@ impl Store<Postgres> {
     pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
         if self.migration {
-            let migrator = Migrator::new(std::path::Path::new("./migrations/postgres/"))
-                .await
-                .unwrap();
-            migrator.run(&self.pool).await.unwrap();
+            migrate!("migrations/postgres").run(&self.pool).await?;
         }
 
         let mut tx = self.pool.begin().await?;

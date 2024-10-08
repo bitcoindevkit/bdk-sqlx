@@ -15,6 +15,7 @@ use bdk_chain::miniscript;
 use bdk_wallet::bitcoin;
 use bdk_wallet::chain as bdk_chain;
 
+pub use sqlx;
 use sqlx::Database;
 use sqlx::Pool;
 
@@ -33,6 +34,9 @@ pub enum BdkSqlxError {
     /// sqlx error
     #[error("sqlx error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    /// migrate error
+    #[error("migrate error: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
 /// Manages a pool of database connections.

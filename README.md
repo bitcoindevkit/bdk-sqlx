@@ -1,5 +1,8 @@
 # bdk-sqlx
 
+## Status
+
+This crate is still **EXPERIMENTAL** do not use with mainnet wallets.
 
 ## Testing
 
