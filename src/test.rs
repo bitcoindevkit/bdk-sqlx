@@ -11,7 +11,14 @@ use bdk_chain::BlockId;
 use bdk_electrum::electrum_client::Client;
 use bdk_electrum::{electrum_client, BdkElectrumClient};
 use bdk_testenv::bitcoincore_rpc::RpcApi;
-use bdk_testenv::TestEnv;
+use bdk_testenv::{anyhow, TestEnv};
+use bdk_wallet::bitcoin::constants::ChainHash;
+use bdk_wallet::bitcoin::hashes::Hash;
+use bdk_wallet::bitcoin::secp256k1::Secp256k1;
+use bdk_wallet::bitcoin::Network::Signet;
+use bdk_wallet::bitcoin::{BlockHash, Network};
+use bdk_wallet::chain::BlockId;
+use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey};
 use bdk_wallet::{
     descriptor,
     descriptor::ExtendedDescriptor,
