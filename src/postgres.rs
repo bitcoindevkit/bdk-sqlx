@@ -96,7 +96,7 @@ impl Store<Postgres> {
     pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
         if self.migration {
-            migrate!("migrations/postgres").run(&self.pool).await?;
+            migrate!("./migrations/postgres").run(&self.pool).await?;
         }
 
         let mut tx = self.pool.begin().await?;

@@ -8,7 +8,6 @@ use bdk_sqlx::Store;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
-use better_panic::Settings;
 use rustls::crypto::ring::default_provider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -36,10 +35,6 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("Failed to install rustls default crypto provider");
 
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
     tracing_subscriber::registry()
         .with(EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(
             |_| {

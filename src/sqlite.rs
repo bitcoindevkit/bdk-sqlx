@@ -110,7 +110,7 @@ impl Store<Sqlite> {
     pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
         if self.migration {
-            migrate!("./migrations/sqlite/").run(&self.pool).await?;
+            migrate!("./migrations/sqlite").run(&self.pool).await?;
         }
 
         let mut tx = self.pool.begin().await?;

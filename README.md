@@ -24,3 +24,7 @@ This crate is still **EXPERIMENTAL** do not use with mainnet wallets.
    ```
    cargo test -- --test-threads=1
    ```
+5. Run example:
+   ```
+   cargo run --example bdk_sqlx_postgres
+   ```
