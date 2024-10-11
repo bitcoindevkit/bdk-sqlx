@@ -135,7 +135,7 @@ impl Store<Sqlite> {
         //dbg!(&row);
 
         if let Some(row) = row {
-            Self::changeset_from_row(&mut tx, &mut changeset, row).await?;
+            Self::changeset_from_row(&mut tx, &mut changeset, row, &self.wallet_name).await?;
         }
 
         Ok(changeset)
@@ -146,6 +146,7 @@ impl Store<Sqlite> {
         tx: &mut Transaction<'_, Sqlite>,
         changeset: &mut ChangeSet,
         row: SqliteRow,
+        wallet_name: &str,
     ) -> Result<(), BdkSqlxError> {
         info!("changeset from row");
 
@@ -175,8 +176,8 @@ impl Store<Sqlite> {
             }
         }
 
-        changeset.tx_graph = tx_graph_changeset_from_sqlite(tx).await?;
-        changeset.local_chain = local_chain_changeset_from_sqlite(tx).await?;
+        changeset.tx_graph = tx_graph_changeset_from_sqlite(tx, wallet_name).await?;
+        changeset.local_chain = local_chain_changeset_from_sqlite(tx, wallet_name).await?;
         Ok(())
     }
 
@@ -292,12 +293,14 @@ async fn update_last_revealed(
 #[tracing::instrument]
 pub async fn tx_graph_changeset_from_sqlite(
     db_tx: &mut Transaction<'_, Sqlite>,
+    wallet_name: &str,
 ) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>, BdkSqlxError> {
     info!("tx graph changeset from sqlite");
     let mut changeset = tx_graph::ChangeSet::default();
 
     // Fetch transactions
-    let rows = sqlx::query("SELECT txid, whole_tx, last_seen FROM tx")
+    let rows = sqlx::query("SELECT txid, whole_tx, last_seen FROM tx WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 
@@ -318,7 +321,8 @@ pub async fn tx_graph_changeset_from_sqlite(
     }
 
     // Fetch txouts
-    let rows = sqlx::query("SELECT txid, vout, value, script FROM txout")
+    let rows = sqlx::query("SELECT txid, vout, value, script FROM txout WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 
@@ -342,9 +346,11 @@ pub async fn tx_graph_changeset_from_sqlite(
     }
 
     // Fetch anchors
-    let rows = sqlx::query("SELECT json(anchor) as anchor, txid FROM anchor_tx")
-        .fetch_all(&mut **db_tx)
-        .await?;
+    let rows =
+        sqlx::query("SELECT json(anchor) as anchor, txid FROM anchor_tx WHERE wallet_name = $1")
+            .bind(wallet_name)
+            .fetch_all(&mut **db_tx)
+            .await?;
 
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
@@ -424,11 +430,13 @@ pub async fn tx_graph_changeset_persist_to_sqlite(
 #[tracing::instrument]
 pub async fn local_chain_changeset_from_sqlite(
     db_tx: &mut Transaction<'_, Sqlite>,
+    wallet_name: &str,
 ) -> Result<local_chain::ChangeSet, BdkSqlxError> {
     info!("local chain changeset from sqlite");
     let mut changeset = local_chain::ChangeSet::default();
 
-    let rows = sqlx::query("SELECT hash, height FROM block")
+    let rows = sqlx::query("SELECT hash, height FROM block WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 

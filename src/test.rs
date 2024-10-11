@@ -1,41 +1,24 @@
-#![allow(unused)]
 use crate::{BdkSqlxError, FutureResult, Store};
 use assert_matches::assert_matches;
-use bdk_chain::bitcoin::constants::ChainHash;
-use bdk_chain::bitcoin::hashes::Hash;
-use bdk_chain::bitcoin::secp256k1::Secp256k1;
-use bdk_chain::bitcoin::Network::Signet;
-use bdk_chain::bitcoin::{BlockHash, Network, Txid};
-use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
-use bdk_chain::BlockId;
-use bdk_electrum::electrum_client::Client;
-use bdk_electrum::{electrum_client, BdkElectrumClient};
-use bdk_testenv::bitcoincore_rpc::RpcApi;
-use bdk_testenv::{anyhow, TestEnv};
 use bdk_wallet::bitcoin::constants::ChainHash;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
-use bdk_wallet::bitcoin::Network::Signet;
-use bdk_wallet::bitcoin::{BlockHash, Network};
-use bdk_wallet::chain::BlockId;
+use bdk_wallet::bitcoin::Network::{Regtest, Signet};
+use bdk_wallet::bitcoin::{
+    transaction, Address, Amount, BlockHash, Network, OutPoint, Transaction, TxIn, TxOut, Txid,
+};
+use bdk_wallet::chain::{tx_graph, BlockId, ConfirmationBlockTime, ConfirmationTime};
 use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey};
 use bdk_wallet::{
-    descriptor,
-    descriptor::ExtendedDescriptor,
-    wallet_name_from_descriptor, AsyncWalletPersister, ChangeSet,
-    KeychainKind::{self, *},
-    LoadError, LoadMismatch, LoadWithPersistError, PersistedWallet, Wallet,
+    bitcoin, descriptor::ExtendedDescriptor, wallet_name_from_descriptor, AsyncWalletPersister,
+    Balance, ChangeSet, KeychainKind::*, LoadError, LoadMismatch, LoadWithPersistError, Update,
+    Wallet,
 };
-use better_panic::Settings;
-use rustls::crypto::ring::default_provider;
-use sqlx::{Database, PgPool, Pool, Postgres, Sqlite, SqlitePool};
-use std::collections::HashSet;
+use sqlx::{Pool, Postgres, Sqlite, SqlitePool};
 use std::env;
-use std::io::Write;
-use std::ops::Deref;
-use std::sync::Arc;
+use std::ops::Add;
+use std::str::FromStr;
 use std::sync::Once;
-use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -60,8 +43,6 @@ pub fn get_test_wpkh() -> &'static str {
 }
 
 const NETWORK: Network = Signet;
-const STOP_GAP: usize = 50;
-const BATCH_SIZE: usize = 50;
 
 fn parse_descriptor(s: &str) -> ExtendedDescriptor {
     <Descriptor<DescriptorPublicKey>>::parse_descriptor(&Secp256k1::new(), s)
@@ -76,7 +57,7 @@ fn initialize() {
     INIT.call_once(|| {
         tracing_subscriber::registry()
             .with(EnvFilter::new(
-                env::var("RUST_LOG").unwrap_or_else(|_| "sqlx=warn,bdk_sqlx=info".into()),
+                env::var("RUST_LOG").unwrap_or_else(|_| "sqlx=warn,bdk_sqlx=warn".into()),
             ))
             .with(tracing_subscriber::fmt::layer())
             .try_init()
@@ -182,14 +163,135 @@ async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore
     Ok(stores)
 }
 
+/// Add a fake transaction to a wallet for testing.
+///
+/// The test wallet must use the `Regtest` network and the added tx will have the given spent,
+/// change, and fee amounts.
+///
+/// The tx ids for the two created transactions (funding and spending) are returned.
+pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: Amount) -> Txid {
+    let receive_address = wallet.reveal_next_address(External).address;
+    let change_address = wallet.reveal_next_address(Internal).address;
+    let sendto_address = Address::from_str("bcrt1q3qtze4ys45tgdvguj66zrk4fu6hq3a3v9pfly5")
+        .expect("address")
+        .require_network(Network::Regtest)
+        .unwrap();
+
+    let tx0 = Transaction {
+        version: transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::all_zeros(),
+                vout: 0,
+            },
+            script_sig: Default::default(),
+            sequence: Default::default(),
+            witness: Default::default(),
+        }],
+        output: vec![TxOut {
+            value: spent.add(change).add(fee),
+            script_pubkey: receive_address.script_pubkey(),
+        }],
+    };
+
+    let tx1 = Transaction {
+        version: transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: tx0.compute_txid(),
+                vout: 0,
+            },
+            script_sig: Default::default(),
+            sequence: Default::default(),
+            witness: Default::default(),
+        }],
+        output: vec![
+            TxOut {
+                value: change,
+                script_pubkey: change_address.script_pubkey(),
+            },
+            TxOut {
+                value: spent,
+                script_pubkey: sendto_address.script_pubkey(),
+            },
+        ],
+    };
+
+    wallet
+        .insert_checkpoint(BlockId {
+            height: 42,
+            hash: BlockHash::all_zeros(),
+        })
+        .unwrap();
+    wallet
+        .insert_checkpoint(BlockId {
+            height: 1_000,
+            hash: BlockHash::all_zeros(),
+        })
+        .unwrap();
+    wallet
+        .insert_checkpoint(BlockId {
+            height: 2_000,
+            hash: BlockHash::all_zeros(),
+        })
+        .unwrap();
+
+    wallet.insert_tx(tx0.clone());
+    insert_anchor_from_conf(
+        wallet,
+        tx0.compute_txid(),
+        ConfirmationTime::Confirmed {
+            height: 1_000,
+            time: 100,
+        },
+    );
+
+    wallet.insert_tx(tx1.clone());
+    insert_anchor_from_conf(
+        wallet,
+        tx1.compute_txid(),
+        ConfirmationTime::Confirmed {
+            height: 2_000,
+            time: 200,
+        },
+    );
+
+    tx1.compute_txid()
+}
+
+/// Simulates confirming a tx with `txid` at the specified `position` by inserting an anchor
+/// at the lowest height in local chain that is greater or equal to `position`'s height,
+/// assuming the confirmation time matches `ConfirmationTime::Confirmed`.
+pub fn insert_anchor_from_conf(wallet: &mut Wallet, txid: Txid, position: ConfirmationTime) {
+    if let ConfirmationTime::Confirmed { height, time } = position {
+        // anchor tx to checkpoint with lowest height that is >= position's height
+        let anchor = wallet
+            .local_chain()
+            .range(height..)
+            .last()
+            .map(|anchor_cp| ConfirmationBlockTime {
+                block_id: anchor_cp.block_id(),
+                confirmation_time: time,
+            })
+            .expect("confirmation height cannot be greater than tip");
+
+        wallet
+            .apply_update(Update {
+                tx_update: tx_graph::TxUpdate {
+                    anchors: [(anchor, txid)].into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+    }
+}
+
 #[tracing::instrument]
 #[tokio::test]
 async fn wallet_is_persisted() -> anyhow::Result<()> {
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
-
     initialize();
 
     // Define descriptors (you may need to adjust these based on your exact requirements)
@@ -247,178 +349,110 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
         }
     }
 
-    // Clean up (optional, depending on your test database strategy)
-    // You might want to delete the test wallet from the database here
-    let db = PgPool::connect(&url).await?;
-    drop_all(db).await.expect("hope its not mainet");
-
     Ok(())
-}
-
-async fn setup_database() -> anyhow::Result<String> {
-    let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
-    let pg = PgPool::connect(&url).await?;
-    match drop_all(pg).await {
-        Ok(_) => dbg!("tables dropped"),
-        Err(_) => dbg!("Error dropping tables"),
-    };
-    Ok(url)
-}
-
-fn get_wallet_descriptors(wallet_type: u8) -> (&'static str, &'static str) {
-    match wallet_type {
-        1 => get_test_tr_single_sig_xprv_with_change_desc(),
-        2 => ("wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/0/*)#j8mkwdgr",
-              "wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/1/*)#rn7hnccm"),
-        3 => get_test_minisicript_with_change_desc(),
-        _ => panic!("Invalid wallet type"),
-    }
-}
-
-async fn create_and_scan_wallet(
-    url: &str,
-    external_desc: &str,
-    internal_desc: &str,
-) -> anyhow::Result<(Store<Postgres>, String)> {
-    let wallet_name = wallet_name_from_descriptor(
-        external_desc,
-        Some(internal_desc),
-        NETWORK,
-        &Secp256k1::new(),
-    )?;
-    let mut store = Store::new_with_url(url.to_string(), Some(wallet_name.clone())).await?;
-    let mut wallet = Wallet::create(external_desc.to_string(), internal_desc.to_string())
-        .network(NETWORK)
-        .create_wallet_async(&mut store)
-        .await?;
-    let _ = electrum_full_scan(&mut wallet).await?;
-    assert!(wallet.persist_async(&mut store).await?);
-    Ok((store, wallet_name))
-}
-
-async fn load_wallet_and_get_transactions(
-    store: &mut Store<Postgres>,
-    external_desc: &str,
-    internal_desc: &str,
-) -> anyhow::Result<Vec<Txid>> {
-    let wallet = Wallet::load()
-        .descriptor(KeychainKind::External, Some(external_desc.to_string()))
-        .descriptor(KeychainKind::Internal, Some(internal_desc.to_string()))
-        .load_wallet_async(store)
-        .await?
-        .expect("wallet must exist");
-    Ok(wallet.transactions().map(|tx| tx.tx_node.txid).collect())
-}
-
-async fn recover_wallet_and_get_transactions(
-    external_desc: &str,
-    internal_desc: &str,
-) -> anyhow::Result<Vec<Txid>> {
-    let mut wallet = Wallet::create(external_desc.to_string(), internal_desc.to_string())
-        .network(NETWORK)
-        .create_wallet_no_persist()?;
-    let _ = electrum_full_scan_no_persist(&mut wallet).await?;
-    Ok(wallet.transactions().map(|tx| tx.tx_node.txid).collect())
 }
 
 #[tracing::instrument]
 #[tokio::test]
 async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
+    initialize();
 
-    default_provider()
-        .install_default()
-        .expect("Failed to install rustls default crypto provider");
-
-    let url = setup_database().await?;
-
-    let wallet_types = [1, 2, 3];
-    let mut stores = Vec::new();
-    let mut persisted_txs = Vec::new();
-    let mut recovered_txs = Vec::new();
-
-    for wallet_type in wallet_types.iter() {
-        let (external_desc, internal_desc) = get_wallet_descriptors(*wallet_type);
-        let (store, _) = create_and_scan_wallet(&url, external_desc, internal_desc).await?;
-        stores.push(store);
+    struct TestCase {
+        descriptors: (String, String),
+        spent: Amount,
+        change: Amount,
+        fee: Amount,
+        store: TestStore,
     }
-
-    for (i, store) in stores.iter_mut().enumerate() {
-        let (external_desc, internal_desc) = get_wallet_descriptors(wallet_types[i]);
-        let mut txs = load_wallet_and_get_transactions(store, external_desc, internal_desc).await?;
-        txs.sort();
-        persisted_txs.push(txs);
-    }
-
-    for wallet_type in wallet_types.iter() {
-        let (external_desc, internal_desc) = get_wallet_descriptors(*wallet_type);
-        let mut txs = recover_wallet_and_get_transactions(external_desc, internal_desc).await?;
-        txs.sort();
-        recovered_txs.push(txs);
-    }
-
-    for i in 0..3 {
-        assert_eq!(persisted_txs[i], recovered_txs[i]);
-    }
-
-    // Clean up
-    let db = PgPool::connect(&url).await?;
-    drop_all(db).await.expect("hope it's not mainnet");
-    Ok(())
-}
-
-async fn electrum_full_scan(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()> {
-    let client = BdkElectrumClient::new(Client::new("ssl://mempool.space:60602").unwrap());
-    client.populate_tx_cache(wallet.tx_graph().full_txs().map(|tx_node| tx_node.tx));
-
-    let request = wallet.start_full_scan().inspect({
-        let mut stdout = std::io::stdout();
-        let mut once = HashSet::<KeychainKind>::new();
-        move |k, spk_i, _| {
-            if once.insert(k) {
-                print!("\nScanning keychain [{:?}]", k);
-            }
-            print!(" {:<3}", spk_i);
-            stdout.flush().expect("must flush");
+    impl TestCase {
+        async fn new(
+            descriptors: (&'static str, &'static str),
+            spent: u64,
+            change: u64,
+            fee: u64,
+        ) -> Vec<Self> {
+            let wallet_name = wallet_name_from_descriptor(
+                descriptors.0,
+                Some(descriptors.1),
+                NETWORK,
+                &Secp256k1::new(),
+            )
+            .unwrap();
+            let stores = create_test_stores(wallet_name.clone()).await.unwrap();
+            stores
+                .into_iter()
+                .map(|store| Self {
+                    descriptors: (descriptors.0.to_string(), descriptors.1.to_string()),
+                    spent: Amount::from_sat(spent),
+                    change: Amount::from_sat(change),
+                    fee: Amount::from_sat(fee),
+                    store,
+                })
+                .collect()
         }
-    });
+    }
+    let mut test_cases = [
+        TestCase::new(get_test_tr_single_sig_xprv_with_change_desc(), 20_000, 11_000, 2000).await,
+        TestCase::new(("wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/0/*)#j8mkwdgr",
+                       "wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/1/*)#rn7hnccm"), 12_000, 30_000, 1500).await,
+        TestCase::new(get_test_minisicript_with_change_desc(), 44_444, 20_000, 5000).await
+    ].into_iter().flatten().collect::<Vec<_>>();
 
-    let update = client.full_scan(request, STOP_GAP, BATCH_SIZE, true)?;
-    wallet.apply_update(update)?;
-    Ok(())
-}
+    let mut saved_tx_ids = Vec::<Txid>::new();
+    let mut saved_balances = Vec::<Balance>::new();
 
-async fn electrum_full_scan_no_persist(wallet: &mut Wallet) -> anyhow::Result<()> {
-    let client = BdkElectrumClient::new(Client::new("ssl://mempool.space:60602").unwrap());
-    client.populate_tx_cache(wallet.tx_graph().full_txs().map(|tx_node| tx_node.tx));
+    // create wallet and save test transaction
+    for test_case in &mut test_cases {
+        let mut wallet = Wallet::create(
+            test_case.descriptors.0.clone(),
+            test_case.descriptors.1.clone(),
+        )
+        .network(Regtest)
+        .create_wallet_async(&mut test_case.store)
+        .await?;
+        let tx_id = insert_fake_tx(
+            &mut wallet,
+            test_case.spent,
+            test_case.change,
+            test_case.fee,
+        );
+        saved_tx_ids.push(tx_id);
+        saved_balances.push(wallet.balance());
+        wallet.persist_async(&mut test_case.store).await?;
+    }
 
-    let request = wallet.start_full_scan().inspect({
-        let mut stdout = std::io::stdout();
-        let mut once = HashSet::<KeychainKind>::new();
-        move |k, spk_i, _| {
-            if once.insert(k) {
-                print!("\nScanning keychain [{:?}]", k);
-            }
-            print!(" {:<3}", spk_i);
-            stdout.flush().expect("must flush");
-        }
-    });
+    saved_tx_ids.reverse();
+    saved_balances.reverse();
 
-    let update = client.full_scan(request, STOP_GAP, BATCH_SIZE, true)?;
-    wallet.apply_update(update)?;
+    // load wallet and test transaction and verify with saved
+    for test_case in &mut test_cases {
+        let wallet = Wallet::load()
+            .descriptor(External, Some(test_case.descriptors.0.clone()))
+            .descriptor(Internal, Some(test_case.descriptors.1.clone()))
+            .check_network(Regtest)
+            .load_wallet_async(&mut test_case.store)
+            .await?
+            .expect("wallet must exist");
+        let saved_tx_ids = saved_tx_ids.pop().unwrap();
+        let loaded_tx_id = wallet
+            .transactions()
+            .map(|tx| tx.tx_node.tx.compute_txid())
+            .next()
+            .expect("txid must exist");
+        assert_eq!(saved_tx_ids, loaded_tx_id);
+
+        let saved_balance = saved_balances.pop().unwrap();
+        let loaded_balance = wallet.balance();
+        assert_eq!(saved_balance, loaded_balance);
+    }
+
     Ok(())
 }
 
 #[tracing::instrument]
 #[tokio::test]
 async fn wallet_load_checks() -> anyhow::Result<()> {
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
+    initialize();
 
     // Define descriptors (you may need to adjust these based on your exact requirements)
     let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_with_change_desc();
@@ -435,7 +469,7 @@ async fn wallet_load_checks() -> anyhow::Result<()> {
     let stores = create_test_stores(wallet_name).await?;
     for mut store in stores {
         // Create a new wallet
-        let mut wallet = Wallet::create(external_desc, internal_desc)
+        let _wallet = Wallet::create(external_desc, internal_desc)
             .network(NETWORK)
             .create_wallet_async(&mut store)
             .await?;
@@ -481,10 +515,7 @@ async fn wallet_load_checks() -> anyhow::Result<()> {
 #[tracing::instrument]
 #[tokio::test]
 async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
+    initialize();
 
     // Define descriptors
     let desc = get_test_tr_single_sig_xprv();
@@ -505,7 +536,6 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
 
         {
             // Recover the wallet
-            let secp = wallet.secp_ctx();
             let wallet = Wallet::load().load_wallet_async(&mut store).await?.unwrap();
             assert_eq!(wallet.derivation_index(External), Some(2));
         }
@@ -532,10 +562,7 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
 #[tracing::instrument]
 #[tokio::test]
 async fn two_wallets_load() -> anyhow::Result<()> {
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
+    initialize();
 
     // Define descriptors
     let (external_desc_wallet_1, internal_desc_wallet_1) =
@@ -603,64 +630,16 @@ async fn two_wallets_load() -> anyhow::Result<()> {
             wallet_1.derivation_index(External),
             wallet_2.derivation_index(External)
         );
-        // FIXME: see https://github.com/bitcoindevkit/bdk-sqlx/pull/10
-        // assert_ne!(
-        //     wallet_1.derivation_index(Internal),
-        //     wallet_2.derivation_index(Internal),
-        //     "different wallets should not have same derivation index"
-        // );
-        // assert_ne!(
-        //     wallet_1.latest_checkpoint(),
-        //     wallet_2.latest_checkpoint(),
-        //     "different wallets should not have same chain tip"
-        // );
-    }
-
-    Ok(())
-}
-
-#[tracing::instrument]
-#[tokio::test]
-async fn sync_with_electrum() -> anyhow::Result<()> {
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
-
-    // Define descriptors (you may need to adjust these based on your exact requirements)
-    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_with_change_desc();
-    // Generate a unique name for this test wallet
-    let wallet_name = wallet_name_from_descriptor(
-        external_desc,
-        Some(internal_desc),
-        Network::Regtest,
-        &Secp256k1::new(),
-    )?;
-
-    let stores = create_test_stores(wallet_name).await?;
-    for mut store in stores {
-        let mut wallet = Wallet::create(external_desc, internal_desc)
-            .network(Network::Regtest)
-            .create_wallet_async(&mut store)
-            .await?;
-
-        // mine blocks and sync with electrum
-        let env = TestEnv::new()?;
-        let electrum_client = electrum_client::Client::new(env.electrsd.electrum_url.as_str())?;
-        let client = BdkElectrumClient::new(electrum_client);
-        let _hashes = env.mine_blocks(9, None)?;
-        env.wait_until_electrum_sees_block(Duration::from_secs(10))?;
-        let new_tip_height: u32 = env.rpc_client().get_block_count()?.try_into().unwrap();
-        assert_eq!(new_tip_height, 10);
-
-        let request = wallet.start_full_scan();
-        let update = client.full_scan(request, STOP_GAP, BATCH_SIZE, false)?;
-        wallet.apply_update(update)?;
-        assert!(wallet.persist_async(&mut store).await?);
-
-        // Recover the wallet
-        let wallet = Wallet::load().load_wallet_async(&mut store).await?.unwrap();
-        assert_eq!(wallet.latest_checkpoint().height(), new_tip_height);
+        assert_ne!(
+            wallet_1.derivation_index(Internal),
+            wallet_2.derivation_index(Internal),
+            "different wallets should not have same derivation index"
+        );
+        assert_ne!(
+            wallet_1.latest_checkpoint(),
+            wallet_2.latest_checkpoint(),
+            "different wallets should not have same chain tip"
+        );
     }
 
     Ok(())

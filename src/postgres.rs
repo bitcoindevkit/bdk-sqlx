@@ -119,7 +119,7 @@ impl Store<Postgres> {
             .await?;
 
         if let Some(row) = row {
-            Self::changeset_from_row(&mut tx, &mut changeset, row).await?;
+            Self::changeset_from_row(&mut tx, &mut changeset, row, &self.wallet_name).await?;
         }
 
         Ok(changeset)
@@ -130,6 +130,7 @@ impl Store<Postgres> {
         tx: &mut Transaction<'_, Postgres>,
         changeset: &mut ChangeSet,
         row: PgRow,
+        wallet_name: &str,
     ) -> Result<(), BdkSqlxError> {
         info!("changeset from row");
 
@@ -159,8 +160,8 @@ impl Store<Postgres> {
             }
         }
 
-        changeset.tx_graph = tx_graph_changeset_from_postgres(tx).await?;
-        changeset.local_chain = local_chain_changeset_from_postgres(tx).await?;
+        changeset.tx_graph = tx_graph_changeset_from_postgres(tx, wallet_name).await?;
+        changeset.local_chain = local_chain_changeset_from_postgres(tx, wallet_name).await?;
         Ok(())
     }
 
@@ -276,12 +277,14 @@ async fn update_last_revealed(
 #[tracing::instrument]
 pub async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
 ) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>, BdkSqlxError> {
     info!("tx graph changeset from postgres");
     let mut changeset = tx_graph::ChangeSet::default();
 
     // Fetch transactions
-    let rows = sqlx::query("SELECT txid, whole_tx, last_seen FROM tx")
+    let rows = sqlx::query("SELECT txid, whole_tx, last_seen FROM tx WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 
@@ -302,7 +305,8 @@ pub async fn tx_graph_changeset_from_postgres(
     }
 
     // Fetch txouts
-    let rows = sqlx::query("SELECT txid, vout, value, script FROM txout")
+    let rows = sqlx::query("SELECT txid, vout, value, script FROM txout WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 
@@ -326,7 +330,8 @@ pub async fn tx_graph_changeset_from_postgres(
     }
 
     // Fetch anchors
-    let rows = sqlx::query("SELECT anchor, txid FROM anchor_tx")
+    let rows = sqlx::query("SELECT anchor, txid FROM anchor_tx WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 
@@ -408,11 +413,13 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 #[tracing::instrument]
 pub async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
 ) -> Result<local_chain::ChangeSet, BdkSqlxError> {
     info!("local chain changeset from postgres");
     let mut changeset = local_chain::ChangeSet::default();
 
-    let rows = sqlx::query("SELECT hash, height FROM block")
+    let rows = sqlx::query("SELECT hash, height FROM block WHERE wallet_name = $1")
+        .bind(wallet_name)
         .fetch_all(&mut **db_tx)
         .await?;
 

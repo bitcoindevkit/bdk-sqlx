@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS keychain (
 -- Hash is block hash hex string,
 -- Block height is a u32
 CREATE TABLE IF NOT EXISTS block (
-    wallet_name TEXT,
+    wallet_name TEXT NOT NULL,
     hash TEXT NOT NULL,
     height INTEGER NOT NULL,
     PRIMARY KEY (wallet_name, hash)
@@ -37,7 +37,7 @@ CREATE INDEX idx_block_height ON block (height);
 -- Whole_tx is a consensus encoded transaction,
 -- Last seen is a u64 unix epoch seconds
 CREATE TABLE IF NOT EXISTS tx (
-    wallet_name TEXT,
+    wallet_name TEXT NOT NULL,
     txid TEXT NOT NULL,
     whole_tx BLOB,
     last_seen INTEGER,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS tx (
 -- TxOut value as SATs
 -- TxOut script consensus encoded
 CREATE TABLE IF NOT EXISTS txout (
-    wallet_name TEXT,
+    wallet_name TEXT NOT NULL,
     txid TEXT NOT NULL,
     vout INTEGER NOT NULL,
     value INTEGER NOT NULL,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS txout (
 -- Anchor is a json serialized Anchor structure as JSONB,
 -- Txid is transaction hash hex string (reversed)
 CREATE TABLE IF NOT EXISTS anchor_tx (
-    wallet_name TEXT,
+    wallet_name TEXT NOT NULL,
     block_hash TEXT NOT NULL,
     anchor BLOB NOT NULL,
     txid TEXT NOT NULL,
