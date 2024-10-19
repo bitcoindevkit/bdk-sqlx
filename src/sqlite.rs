@@ -35,7 +35,7 @@ impl AsyncWalletPersister for Store<Sqlite> {
         Self: 'a,
     {
         info!("initialize store");
-        Box::pin(store.migrate_and_read())
+        Box::pin(store.read())
     }
 
     #[tracing::instrument]
@@ -52,22 +52,22 @@ impl AsyncWalletPersister for Store<Sqlite> {
 }
 
 impl Store<Sqlite> {
-    /// Construct a new [`Store`] with an existing sqlite connection.
+    /// Construct a new [`Store`] with an existing sqlite connection pool.
     #[tracing::instrument]
     pub async fn new(
         pool: Pool<Sqlite>,
         wallet_name: String,
-        migration: bool,
+        migrate: bool,
     ) -> Result<Self, BdkSqlxError> {
-        info!("new store");
-        Ok(Self {
-            pool,
-            wallet_name,
-            migration,
-        })
+        info!("new sqlite store");
+        if migrate {
+            info!("migrate");
+            migrate!("./migrations/postgres").run(&pool).await?;
+        }
+        Ok(Self { pool, wallet_name })
     }
 
-    /// Construct a new [`Store`] without an existing sqlite connection.
+    /// Construct a new [`Store`] without an existing sqlite connection pool.
     ///
     /// The SQLite DB URL should look like "sqlite://bdk_wallet.sqlite?mode=rwc".
     ///
@@ -77,6 +77,7 @@ impl Store<Sqlite> {
     pub async fn new_with_url(
         url: Option<String>,
         wallet_name: String,
+        migrate: bool,
     ) -> Result<Store<Sqlite>, BdkSqlxError> {
         info!("new store with url");
         let pool = if let Some(url) = url {
@@ -91,26 +92,16 @@ impl Store<Sqlite> {
                 .connect(":memory:")
                 .await?
         };
-        Ok(Self {
-            pool,
-            wallet_name,
-            migration: true,
-        })
+        Self::new(pool, wallet_name, migrate).await
     }
 }
 
 impl Store<Sqlite> {
     #[tracing::instrument]
-    pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
+    pub(crate) async fn read(&self) -> Result<ChangeSet, BdkSqlxError> {
         info!("migrate and read");
-        if self.migration {
-            migrate!("./migrations/sqlite").run(&self.pool).await?;
-        }
-
         let mut tx = self.pool.begin().await?;
-
         let mut changeset = ChangeSet::default();
-
         let sql =
             "SELECT n.name as network,
             k_int.descriptor as internal_descriptor, k_int.last_revealed as internal_last_revealed,

@@ -37,7 +37,7 @@ impl AsyncWalletPersister for Store<Postgres> {
         Self: 'a,
     {
         info!("initialize store");
-        Box::pin(store.migrate_and_read())
+        Box::pin(store.read())
     }
 
     #[tracing::instrument]
@@ -59,14 +59,14 @@ impl Store<Postgres> {
     pub async fn new(
         pool: Pool<Postgres>,
         wallet_name: String,
-        migration: bool,
+        migrate: bool,
     ) -> Result<Self, BdkSqlxError> {
-        info!("new store");
-        Ok(Self {
-            pool,
-            wallet_name,
-            migration,
-        })
+        info!("new postgres store");
+        if migrate {
+            info!("migrate");
+            migrate!("./migrations/postgres").run(&pool).await?;
+        }
+        Ok(Self { pool, wallet_name })
     }
 
     /// Construct a new [`Store`] without an existing pg connection.
@@ -74,29 +74,19 @@ impl Store<Postgres> {
     pub async fn new_with_url(
         url: String,
         wallet_name: String,
+        migrate: bool,
     ) -> Result<Store<Postgres>, BdkSqlxError> {
         info!("new store with url");
         let pool = PgPool::connect(url.as_str()).await?;
-        Ok(Self {
-            pool,
-            wallet_name,
-            migration: true,
-        })
+        Self::new(pool, wallet_name, migrate).await
     }
 }
 
 impl Store<Postgres> {
     #[tracing::instrument]
-    pub(crate) async fn migrate_and_read(&self) -> Result<ChangeSet, BdkSqlxError> {
-        info!("migrate and read");
-        if self.migration {
-            migrate!("./migrations/postgres").run(&self.pool).await?;
-        }
-
+    pub(crate) async fn read(&self) -> Result<ChangeSet, BdkSqlxError> {
         let mut tx = self.pool.begin().await?;
-
         let mut changeset = ChangeSet::default();
-
         let sql =
             "SELECT n.name as network,
             k_int.descriptor as internal_descriptor, k_int.last_revealed as internal_last_revealed,

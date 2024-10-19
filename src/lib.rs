@@ -42,7 +42,6 @@ pub enum BdkSqlxError {
 pub struct Store<DB: Database> {
     pub(crate) pool: Pool<DB>,
     wallet_name: String,
-    migration: bool,
 }
 
 type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
