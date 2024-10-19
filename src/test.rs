@@ -151,13 +151,12 @@ async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore
     let pool = Pool::<Postgres>::connect(&url.clone()).await?;
     // Drop all before creating new store for testing
     pool.drop_all().await?;
-    let postgres_store =
-        Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name.clone())).await?;
+    let postgres_store = Store::<Postgres>::new_with_url(url.clone(), wallet_name.clone()).await?;
     stores.push(TestStore::Postgres(postgres_store));
 
     // Setup sqlite in-memory database
     let pool = SqlitePool::connect(":memory:").await?;
-    let sqlite_store = Store::<Sqlite>::new(pool.clone(), Some(wallet_name.clone()), true).await?;
+    let sqlite_store = Store::<Sqlite>::new(pool.clone(), wallet_name.clone(), true).await?;
     stores.push(TestStore::Sqlite(sqlite_store));
 
     Ok(stores)

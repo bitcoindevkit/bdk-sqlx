@@ -56,13 +56,10 @@ impl Store<Sqlite> {
     #[tracing::instrument]
     pub async fn new(
         pool: Pool<Sqlite>,
-        wallet_name: Option<String>,
+        wallet_name: String,
         migration: bool,
     ) -> Result<Self, BdkSqlxError> {
         info!("new store");
-
-        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_sqlites_wallet".to_string());
-
         Ok(Self {
             pool,
             wallet_name,
@@ -79,10 +76,9 @@ impl Store<Sqlite> {
     #[tracing::instrument]
     pub async fn new_with_url(
         url: Option<String>,
-        wallet_name: Option<String>,
+        wallet_name: String,
     ) -> Result<Store<Sqlite>, BdkSqlxError> {
         info!("new store with url");
-
         let pool = if let Some(url) = url {
             SqlitePool::connect(url.as_str()).await?
         } else {
@@ -95,8 +91,6 @@ impl Store<Sqlite> {
                 .connect(":memory:")
                 .await?
         };
-        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_sqlite_wallet".to_string());
-
         Ok(Self {
             pool,
             wallet_name,

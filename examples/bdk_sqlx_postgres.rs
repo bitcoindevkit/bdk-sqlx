@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(
             |_| {
                 "sqlx=warn,\
-                    bdk_sqlx=info"
+                    bdk_sqlx=debug"
                     .into()
             },
         )))
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         &secp,
     )?;
     let mut store =
-        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name)).await?;
+        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         bdk_wallet::wallet_name_from_descriptor(VAULT_DESC, Some(CHANGE_DESC), NETWORK, &secp)?;
 
     let mut store =
-        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), Some(wallet_name)).await?;
+        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,

@@ -24,7 +24,20 @@ This crate is still **EXPERIMENTAL** do not use with mainnet wallets.
    ```
    cargo test -- --test-threads=1
    ```
-5. Run example:
+   
+## Example
+
+1. Create empty test database:
+   ```
+   psql postgres
+   postgres=# create database example_bdk_wallet;
+   postgres=# \q
+   ```
+2. Set DATABASE_URL to test database:
+   ```
+   export DATABASE_URL=postgresql://localhost/example_bdk_wallet
+   ```
+3. Run example:
    ```
    cargo run --example bdk_sqlx_postgres
    ```

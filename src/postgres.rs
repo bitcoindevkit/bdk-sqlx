@@ -58,13 +58,10 @@ impl Store<Postgres> {
     #[tracing::instrument]
     pub async fn new(
         pool: Pool<Postgres>,
-        wallet_name: Option<String>,
+        wallet_name: String,
         migration: bool,
     ) -> Result<Self, BdkSqlxError> {
         info!("new store");
-
-        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_pg_wallet".to_string());
-
         Ok(Self {
             pool,
             wallet_name,
@@ -76,13 +73,10 @@ impl Store<Postgres> {
     #[tracing::instrument]
     pub async fn new_with_url(
         url: String,
-        wallet_name: Option<String>,
+        wallet_name: String,
     ) -> Result<Store<Postgres>, BdkSqlxError> {
         info!("new store with url");
-
         let pool = PgPool::connect(url.as_str()).await?;
-        let wallet_name = wallet_name.unwrap_or_else(|| "bdk_pg_wallet".to_string());
-
         Ok(Self {
             pool,
             wallet_name,
