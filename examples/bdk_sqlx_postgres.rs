@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use bdk_electrum::{electrum_client, BdkElectrumClient};
+use bdk_sqlx::sqlx::Postgres;
 use bdk_sqlx::Store;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
-use better_panic::Settings;
 use rustls::crypto::ring::default_provider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -34,15 +34,12 @@ async fn main() -> anyhow::Result<()> {
     default_provider()
         .install_default()
         .expect("Failed to install rustls default crypto provider");
-    Settings::debug()
-        .most_recent_first(false)
-        .lineno_suffix(true)
-        .install();
+
     tracing_subscriber::registry()
         .with(EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(
             |_| {
                 "sqlx=warn,\
-                    bdk_sqlx=info"
+                    bdk_sqlx=debug"
                     .into()
             },
         )))
@@ -59,7 +56,8 @@ async fn main() -> anyhow::Result<()> {
         NETWORK,
         &secp,
     )?;
-    let mut store = bdk_sqlx::Store::new_with_url(url.clone(), Some(wallet_name)).await?;
+    let mut store =
+        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name, true).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,
@@ -86,7 +84,8 @@ async fn main() -> anyhow::Result<()> {
     let wallet_name =
         bdk_wallet::wallet_name_from_descriptor(VAULT_DESC, Some(CHANGE_DESC), NETWORK, &secp)?;
 
-    let mut store = bdk_sqlx::Store::new_with_url(url.clone(), Some(wallet_name)).await?;
+    let mut store =
+        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name, true).await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,
@@ -114,10 +113,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn electrum(wallet: &mut PersistedWallet<Store>) -> anyhow::Result<()> {
+fn electrum(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()> {
     let client = BdkElectrumClient::new(electrum_client::Client::new(ELECTRUM_URL)?);
 
-    // Populate the electrum client's transaction cache so it doesn't redownload transaction we
+    // Populate the electrum client's transaction cache so it doesn't re-download transaction we
     // already have.
     client.populate_tx_cache(wallet.tx_graph().full_txs().map(|tx_node| tx_node.tx));
 

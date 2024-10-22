@@ -1,34 +1,24 @@
 [package]
-name = "bdk-sqlx"
+name = "bdk_sqlx"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "bdk_sqlx"
-path = "src/lib.rs"
-
-[[bin]]
-name = "async_wallet_bdk_sqlx"
-path = "src/main.rs"
-
 [dependencies]
-sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring","derive", "postgres", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
-thiserror = "1"
-tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
+bdk_wallet = { version = "1.0.0-beta.5" }
 serde = { version = "1.0.208", features = ["derive"] }
 serde_json = "1.0.125"
-better-panic = "0.3.0"
-rustls = "0.23.12"
+sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring","derive", "postgres", "sqlite", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
+thiserror = "1"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde_json", "json"] }
-anyhow = "1.0.86"
-rand = "0.8.5"
-uuid = "1.10.0"
+
+[dev-dependencies]
 assert_matches = "1.5.0"
-pg-embed = { version = "0.7.1", features = ["default"] }
+anyhow = "1.0.89"
+bdk_electrum = { version = "0.19.0"}
+rustls = "0.23.14"
 
-
-bdk_wallet = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2", features = ["std"], default-features = false }
-bdk_chain = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
-bdk_electrum = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
-bdk_testenv = { git = "https://github.com/bitcoindevkit/bdk", tag = "v1.0.0-beta.2" }
+[[example]]
+name = "bdk_sqlx_postgres"
+path = "examples/bdk_sqlx_postgres.rs"
