@@ -7,7 +7,7 @@ use bdk_wallet::bitcoin::Network::{Regtest, Signet};
 use bdk_wallet::bitcoin::{
     transaction, Address, Amount, BlockHash, Network, OutPoint, Transaction, TxIn, TxOut, Txid,
 };
-use bdk_wallet::chain::{tx_graph, BlockId, ConfirmationBlockTime, ConfirmationTime};
+use bdk_wallet::chain::{tx_graph, BlockId, ConfirmationBlockTime};
 use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey};
 use bdk_wallet::{
     bitcoin, descriptor::ExtendedDescriptor, wallet_name_from_descriptor, AsyncWalletPersister,
@@ -219,42 +219,54 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
         ],
     };
 
-    wallet
-        .insert_checkpoint(BlockId {
+    bdk_wallet::test_utils::insert_checkpoint(
+        wallet,
+        BlockId {
             height: 42,
             hash: BlockHash::all_zeros(),
-        })
-        .unwrap();
-    wallet
-        .insert_checkpoint(BlockId {
-            height: 1_000,
-            hash: BlockHash::all_zeros(),
-        })
-        .unwrap();
-    wallet
-        .insert_checkpoint(BlockId {
-            height: 2_000,
-            hash: BlockHash::all_zeros(),
-        })
-        .unwrap();
-
-    wallet.insert_tx(tx0.clone());
-    insert_anchor_from_conf(
-        wallet,
-        tx0.compute_txid(),
-        ConfirmationTime::Confirmed {
-            height: 1_000,
-            time: 100,
         },
     );
 
-    wallet.insert_tx(tx1.clone());
+    bdk_wallet::test_utils::insert_checkpoint(
+        wallet,
+        BlockId {
+            height: 1_000,
+            hash: BlockHash::all_zeros(),
+        },
+    );
+    bdk_wallet::test_utils::insert_checkpoint(
+        wallet,
+        BlockId {
+            height: 2_000,
+            hash: BlockHash::all_zeros(),
+        },
+    );
+
+    bdk_wallet::test_utils::insert_tx(wallet, tx0.clone());
+
+    bdk_wallet::test_utils::insert_tx(wallet, tx0.clone());
+    insert_anchor_from_conf(
+        wallet,
+        tx0.compute_txid(),
+        ConfirmationBlockTime {
+            block_id: BlockId {
+                height: 1_000,
+                hash: BlockHash::all_zeros(),
+            },
+            confirmation_time: 100,
+        },
+    );
+
+    bdk_wallet::test_utils::insert_tx(wallet, tx1.clone());
     insert_anchor_from_conf(
         wallet,
         tx1.compute_txid(),
-        ConfirmationTime::Confirmed {
-            height: 2_000,
-            time: 200,
+        ConfirmationBlockTime {
+            block_id: BlockId {
+                height: 2_000,
+                hash: BlockHash::all_zeros(),
+            },
+            confirmation_time: 200,
         },
     );
 
@@ -264,29 +276,32 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
 /// Simulates confirming a tx with `txid` at the specified `position` by inserting an anchor
 /// at the lowest height in local chain that is greater or equal to `position`'s height,
 /// assuming the confirmation time matches `ConfirmationTime::Confirmed`.
-pub fn insert_anchor_from_conf(wallet: &mut Wallet, txid: Txid, position: ConfirmationTime) {
-    if let ConfirmationTime::Confirmed { height, time } = position {
-        // anchor tx to checkpoint with lowest height that is >= position's height
-        let anchor = wallet
-            .local_chain()
-            .range(height..)
-            .last()
-            .map(|anchor_cp| ConfirmationBlockTime {
-                block_id: anchor_cp.block_id(),
-                confirmation_time: time,
-            })
-            .expect("confirmation height cannot be greater than tip");
+pub fn insert_anchor_from_conf(wallet: &mut Wallet, txid: Txid, position: ConfirmationBlockTime) {
+    let ConfirmationBlockTime {
+        block_id,
+        confirmation_time,
+    } = position;
 
-        wallet
-            .apply_update(Update {
-                tx_update: tx_graph::TxUpdate {
-                    anchors: [(anchor, txid)].into(),
-                    ..Default::default()
-                },
+    // anchor tx to checkpoint with lowest height that is >= position's height
+    let anchor = wallet
+        .local_chain()
+        .range(block_id.height..)
+        .last()
+        .map(|anchor_cp| ConfirmationBlockTime {
+            block_id: anchor_cp.block_id(),
+            confirmation_time,
+        })
+        .expect("confirmation height cannot be greater than tip");
+
+    wallet
+        .apply_update(Update {
+            tx_update: tx_graph::TxUpdate {
+                anchors: [(anchor, txid)].into(),
                 ..Default::default()
-            })
-            .unwrap();
-    }
+            },
+            ..Default::default()
+        })
+        .unwrap();
 }
 
 #[tracing::instrument]
@@ -611,7 +626,7 @@ async fn two_wallets_load() -> anyhow::Result<()> {
             height: 100,
             hash: BlockHash::all_zeros(),
         };
-        let _ = wallet_2.insert_checkpoint(block).unwrap();
+        let _ = bdk_wallet::test_utils::insert_checkpoint(&mut wallet_2, block);
         assert!(wallet_2.persist_async(&mut store_2).await?);
 
         // Recover the wallet_1
