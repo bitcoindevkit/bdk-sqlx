@@ -1,48 +1,42 @@
-use crate::{BdkSqlxError, FutureResult, Store};
-use assert_matches::assert_matches;
-use bdk_wallet::bitcoin::constants::ChainHash;
-use bdk_wallet::bitcoin::hashes::Hash;
-use bdk_wallet::bitcoin::secp256k1::Secp256k1;
-use bdk_wallet::bitcoin::Network::{Regtest, Signet};
-use bdk_wallet::bitcoin::{
-    transaction, Address, Amount, BlockHash, Network, OutPoint, Transaction, TxIn, TxOut, Txid,
-};
-use bdk_wallet::chain::{tx_graph, BlockId, ConfirmationBlockTime};
-use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey};
-use bdk_wallet::{
-    bitcoin, descriptor::ExtendedDescriptor, wallet_name_from_descriptor, AsyncWalletPersister,
-    Balance, ChangeSet, KeychainKind::*, LoadError, LoadMismatch, LoadWithPersistError, Update,
-    Wallet,
-};
-use sqlx::{Pool, Postgres, Sqlite, SqlitePool};
 use std::env;
 use std::ops::Add;
 use std::str::FromStr;
 use std::sync::Once;
+
+use assert_matches::assert_matches;
+use bdk_chain::{BlockId, ConfirmationBlockTime};
+use bdk_wallet::{
+    bitcoin, chain as bdk_chain,
+    descriptor::ExtendedDescriptor,
+    miniscript::{Descriptor, DescriptorPublicKey},
+    test_utils, wallet_name_from_descriptor, AsyncWalletPersister, Balance, ChangeSet,
+    KeychainKind::*,
+    LoadError, LoadMismatch, LoadWithPersistError, Wallet,
+};
+use bitcoin::{
+    constants::ChainHash,
+    hashes::Hash,
+    secp256k1::Secp256k1,
+    Address, Amount, BlockHash,
+    Network::{self, Regtest},
+    OutPoint, Transaction, TxIn, TxOut, Txid,
+};
+use sqlx::{Pool, Postgres, Sqlite, SqlitePool};
+use test_utils::{
+    get_test_tr_single_sig_xprv_and_change_desc, get_test_wpkh, insert_anchor, insert_checkpoint,
+    insert_tx, new_tx,
+};
 use tracing::info;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+use crate::{BdkSqlxError, FutureResult, Store};
 
 pub fn get_test_minisicript_with_change_desc() -> (&'static str, &'static str) {
     ("wsh(andor(multi(2,[a0d3c79c/48'/1'/79'/2']tpubDEsGdqFaKUVnVNZZw8AixJ8C3yD8o6nN7hsdLfbtVRDTk3PNrQ2pcWNWNbxhdcNSgQP25pUpgRQ7qiVtN3YvSzACKizrvzSwH9SQ2Bjbbwt/0/*,[ea2484f9/48'/1'/79'/2']tpubDFjkswBXoRHKkvmHsxv4xdDqbjg1peX9zJytLeSLbXuwVgYhXgbABzC2r5MAWxqWoaUr7hWGW5TPjA9sNvxa3mX6DrNBdynDsEvwDoXGFpm/0/*,[93f245d7/48'/1'/79'/2']tpubDEVnR72gRgTsqaPFMacV6fCfaSEe56gcDomuGhk9MFeUdEi18riJCokgsZr2x1KKGRM59TJ4AQ6FuNun3khh95ceoH2ytN13nVD7yDLP5LJ/0/*),or_i(and_v(v:pkh([61cdf766/48'/1'/79'/2']tpubDEXETCw2WurhazfW5gW1z4njP6yLXDQmCGfjWGP5k3BuTQ5iZqovMr1zz1zWPhDMRn11hXGpZHodus1LysXnwREsD1ig96M24JhQCpPPpf6/0/*),after(1753228800)),thresh(2,pk([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/0/*),s:pk([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/0/*),s:pk([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/0/*),snl:after(1739836800))),and_v(v:thresh(2,pkh([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/2/*),a:pkh([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/2/*),a:pkh([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/2/*)),after(1757116800))))",
      "wsh(andor(multi(2,[a0d3c79c/48'/1'/79'/2']tpubDEsGdqFaKUVnVNZZw8AixJ8C3yD8o6nN7hsdLfbtVRDTk3PNrQ2pcWNWNbxhdcNSgQP25pUpgRQ7qiVtN3YvSzACKizrvzSwH9SQ2Bjbbwt/1/*,[ea2484f9/48'/1'/79'/2']tpubDFjkswBXoRHKkvmHsxv4xdDqbjg1peX9zJytLeSLbXuwVgYhXgbABzC2r5MAWxqWoaUr7hWGW5TPjA9sNvxa3mX6DrNBdynDsEvwDoXGFpm/1/*,[93f245d7/48'/1'/79'/2']tpubDEVnR72gRgTsqaPFMacV6fCfaSEe56gcDomuGhk9MFeUdEi18riJCokgsZr2x1KKGRM59TJ4AQ6FuNun3khh95ceoH2ytN13nVD7yDLP5LJ/1/*),or_i(and_v(v:pkh([61cdf766/48'/1'/79'/2']tpubDEXETCw2WurhazfW5gW1z4njP6yLXDQmCGfjWGP5k3BuTQ5iZqovMr1zz1zWPhDMRn11hXGpZHodus1LysXnwREsD1ig96M24JhQCpPPpf6/1/*),after(1753228800)),thresh(2,pk([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/1/*),s:pk([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/1/*),s:pk([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/1/*),snl:after(1739836800))),and_v(v:thresh(2,pkh([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/3/*),a:pkh([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/3/*),a:pkh([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/3/*)),after(1757116800))))")
 }
 
-pub fn get_test_tr_single_sig_xprv_with_change_desc() -> (&'static str, &'static str) {
-    ("tr(tprv8ZgxMBicQKsPdDArR4xSAECuVxeX1jwwSXR4ApKbkYgZiziDc4LdBy2WvJeGDfUSE4UT4hHhbgEwbdq8ajjUHiKDegkwrNU6V55CxcxonVN/0/*)",
-     "tr(tprv8ZgxMBicQKsPdDArR4xSAECuVxeX1jwwSXR4ApKbkYgZiziDc4LdBy2WvJeGDfUSE4UT4hHhbgEwbdq8ajjUHiKDegkwrNU6V55CxcxonVN/1/*)")
-}
-
-pub fn get_test_tr_single_sig_xprv() -> &'static str {
-    "tr(tprv8ZgxMBicQKsPdDArR4xSAECuVxeX1jwwSXR4ApKbkYgZiziDc4LdBy2WvJeGDfUSE4UT4hHhbgEwbdq8ajjUHiKDegkwrNU6V55CxcxonVN/*)"
-}
-
-pub fn get_test_wpkh() -> &'static str {
-    "wpkh(cVpPVruEDdmutPzisEsYvtST1usBR3ntr8pXSyt6D2YYqXRyPcFW)"
-}
-
-const NETWORK: Network = Signet;
+const NETWORK: Network = Regtest;
 
 fn parse_descriptor(s: &str) -> ExtendedDescriptor {
     <Descriptor<DescriptorPublicKey>>::parse_descriptor(&Secp256k1::new(), s)
@@ -178,34 +172,21 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
         .unwrap();
 
     let tx0 = Transaction {
-        version: transaction::Version::ONE,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::all_zeros(),
-                vout: 0,
-            },
-            script_sig: Default::default(),
-            sequence: Default::default(),
-            witness: Default::default(),
-        }],
+        input: vec![TxIn::default()],
         output: vec![TxOut {
             value: spent.add(change).add(fee),
             script_pubkey: receive_address.script_pubkey(),
         }],
+        ..new_tx(0)
     };
 
     let tx1 = Transaction {
-        version: transaction::Version::ONE,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint {
                 txid: tx0.compute_txid(),
                 vout: 0,
             },
-            script_sig: Default::default(),
-            sequence: Default::default(),
-            witness: Default::default(),
+            ..Default::default()
         }],
         output: vec![
             TxOut {
@@ -217,9 +198,10 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
                 script_pubkey: sendto_address.script_pubkey(),
             },
         ],
+        ..new_tx(1)
     };
 
-    bdk_wallet::test_utils::insert_checkpoint(
+    insert_checkpoint(
         wallet,
         BlockId {
             height: 42,
@@ -227,14 +209,14 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
         },
     );
 
-    bdk_wallet::test_utils::insert_checkpoint(
+    insert_checkpoint(
         wallet,
         BlockId {
             height: 1_000,
             hash: BlockHash::all_zeros(),
         },
     );
-    bdk_wallet::test_utils::insert_checkpoint(
+    insert_checkpoint(
         wallet,
         BlockId {
             height: 2_000,
@@ -242,64 +224,28 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
         },
     );
 
-    bdk_wallet::test_utils::insert_tx(wallet, tx0.clone());
-    insert_anchor_from_conf(
-        wallet,
-        tx0.compute_txid(),
-        ConfirmationBlockTime {
-            block_id: BlockId {
-                height: 1_000,
-                hash: BlockHash::all_zeros(),
-            },
-            confirmation_time: 100,
+    let anchor = ConfirmationBlockTime {
+        block_id: BlockId {
+            height: 1_000,
+            hash: BlockHash::all_zeros(),
         },
-    );
+        confirmation_time: 100,
+    };
+    insert_anchor(wallet, tx0.compute_txid(), anchor);
+    insert_tx(wallet, tx0);
 
-    bdk_wallet::test_utils::insert_tx(wallet, tx1.clone());
-    insert_anchor_from_conf(
-        wallet,
-        tx1.compute_txid(),
-        ConfirmationBlockTime {
-            block_id: BlockId {
-                height: 2_000,
-                hash: BlockHash::all_zeros(),
-            },
-            confirmation_time: 200,
+    let anchor = ConfirmationBlockTime {
+        block_id: BlockId {
+            height: 2_000,
+            hash: BlockHash::all_zeros(),
         },
-    );
+        confirmation_time: 200,
+    };
+    let txid_1 = tx1.compute_txid();
+    insert_anchor(wallet, txid_1, anchor);
+    insert_tx(wallet, tx1);
 
-    tx1.compute_txid()
-}
-
-/// Simulates confirming a tx with `txid` at the specified `position` by inserting an anchor
-/// at the lowest height in local chain that is greater or equal to `position`'s height,
-/// assuming the confirmation time matches `ConfirmationTime::Confirmed`.
-pub fn insert_anchor_from_conf(wallet: &mut Wallet, txid: Txid, position: ConfirmationBlockTime) {
-    let ConfirmationBlockTime {
-        block_id,
-        confirmation_time,
-    } = position;
-
-    // anchor tx to checkpoint with lowest height that is >= position's height
-    let anchor = wallet
-        .local_chain()
-        .range(block_id.height..)
-        .last()
-        .map(|anchor_cp| ConfirmationBlockTime {
-            block_id: anchor_cp.block_id(),
-            confirmation_time,
-        })
-        .expect("confirmation height cannot be greater than tip");
-
-    wallet
-        .apply_update(Update {
-            tx_update: tx_graph::TxUpdate {
-                anchors: [(anchor, txid)].into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .unwrap();
+    txid_1
 }
 
 #[tracing::instrument]
@@ -308,7 +254,7 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
     initialize();
 
     // Define descriptors (you may need to adjust these based on your exact requirements)
-    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_with_change_desc();
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
     // Generate a unique name for this test wallet
     let wallet_name = wallet_name_from_descriptor(
         external_desc,
@@ -405,7 +351,7 @@ async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
         }
     }
     let mut test_cases = [
-        TestCase::new(get_test_tr_single_sig_xprv_with_change_desc(), 20_000, 11_000, 2000).await,
+        TestCase::new(get_test_tr_single_sig_xprv_and_change_desc(), 20_000, 11_000, 2000).await,
         TestCase::new(("wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/0/*)#j8mkwdgr",
                        "wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/1/*)#rn7hnccm"), 12_000, 30_000, 1500).await,
         TestCase::new(get_test_minisicript_with_change_desc(), 44_444, 20_000, 5000).await
@@ -468,7 +414,7 @@ async fn wallet_load_checks() -> anyhow::Result<()> {
     initialize();
 
     // Define descriptors (you may need to adjust these based on your exact requirements)
-    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_with_change_desc();
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
     let parsed_ext = parse_descriptor(external_desc);
     let parsed_int = parse_descriptor(internal_desc);
     // Generate a unique name for this test wallet
@@ -531,7 +477,7 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
     initialize();
 
     // Define descriptors
-    let desc = get_test_tr_single_sig_xprv();
+    let (desc, _) = get_test_tr_single_sig_xprv_and_change_desc();
 
     // Generate a unique name for this test wallet
     let wallet_name = wallet_name_from_descriptor(desc, Some(desc), NETWORK, &Secp256k1::new())?;
@@ -579,7 +525,7 @@ async fn two_wallets_load() -> anyhow::Result<()> {
 
     // Define descriptors
     let (external_desc_wallet_1, internal_desc_wallet_1) =
-        get_test_tr_single_sig_xprv_with_change_desc();
+        get_test_tr_single_sig_xprv_and_change_desc();
     let (external_desc_wallet_2, internal_desc_wallet_2) = ("wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/0/*)#j8mkwdgr", "wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/1/*)#rn7hnccm");
 
     // Generate a unique name for test wallets
