@@ -243,8 +243,6 @@ pub fn insert_fake_tx(wallet: &mut Wallet, spent: Amount, change: Amount, fee: A
     );
 
     bdk_wallet::test_utils::insert_tx(wallet, tx0.clone());
-
-    bdk_wallet::test_utils::insert_tx(wallet, tx0.clone());
     insert_anchor_from_conf(
         wallet,
         tx0.compute_txid(),
@@ -626,7 +624,7 @@ async fn two_wallets_load() -> anyhow::Result<()> {
             height: 100,
             hash: BlockHash::all_zeros(),
         };
-        let _ = bdk_wallet::test_utils::insert_checkpoint(&mut wallet_2, block);
+        bdk_wallet::test_utils::insert_checkpoint(&mut wallet_2, block);
         assert!(wallet_2.persist_async(&mut store_2).await?);
 
         // Recover the wallet_1
