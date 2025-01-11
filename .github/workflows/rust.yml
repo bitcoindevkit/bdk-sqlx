@@ -56,6 +56,6 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Check fmt
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -Dwarnings
