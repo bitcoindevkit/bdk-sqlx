@@ -353,7 +353,7 @@ pub async fn tx_graph_changeset_from_postgres(
 
     // Fetch txouts
     let rows = sqlx::query(
-        r#"SELECT txid, whole_tx, last_seen FROM "bdk_wallet"."tx" WHERE wallet_name = $1"#,
+        r#"SELECT txid, vout, value, script FROM "bdk_wallet"."txout" WHERE wallet_name = $1"#,
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
