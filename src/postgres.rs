@@ -31,7 +31,7 @@ use tracing::info;
 impl AsyncWalletPersister for Store<Postgres> {
     type Error = BdkSqlxError;
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     fn initialize<'a>(store: &'a mut Self) -> FutureResult<'a, ChangeSet, Self::Error>
     where
         Self: 'a,
@@ -40,7 +40,7 @@ impl AsyncWalletPersister for Store<Postgres> {
         Box::pin(store.read())
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     fn persist<'a>(
         store: &'a mut Self,
         changeset: &'a ChangeSet,
@@ -55,7 +55,7 @@ impl AsyncWalletPersister for Store<Postgres> {
 
 impl Store<Postgres> {
     /// Construct a new [`Store`] with an existing pg connection.
-    #[tracing::instrument]
+    #[tracing::instrument(skip(pool, migrate))]
     pub async fn new(
         pool: Pool<Postgres>,
         wallet_name: String,
@@ -83,9 +83,9 @@ impl Store<Postgres> {
 }
 
 impl Store<Postgres> {
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn read(&self) -> Result<ChangeSet, BdkSqlxError> {
-        let mut tx = self.pool.begin().await?;
+        let mut db_tx = self.pool.begin().await?;
         let mut changeset = ChangeSet::default();
         let sql =
             "SELECT n.name as network,
@@ -99,19 +99,19 @@ impl Store<Postgres> {
         // Fetch wallet data
         let row = sqlx::query(sql)
             .bind(&self.wallet_name)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *db_tx)
             .await?;
 
         if let Some(row) = row {
-            Self::changeset_from_row(&mut tx, &mut changeset, row, &self.wallet_name).await?;
+            Self::changeset_from_row(&mut db_tx, &mut changeset, row, &self.wallet_name).await?;
         }
 
         Ok(changeset)
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip(db_tx, changeset, row))]
     pub(crate) async fn changeset_from_row(
-        tx: &mut Transaction<'_, Postgres>,
+        db_tx: &mut Transaction<'_, Postgres>,
         changeset: &mut ChangeSet,
         row: PgRow,
         wallet_name: &str,
@@ -144,12 +144,12 @@ impl Store<Postgres> {
             }
         }
 
-        changeset.tx_graph = tx_graph_changeset_from_postgres(tx, wallet_name).await?;
-        changeset.local_chain = local_chain_changeset_from_postgres(tx, wallet_name).await?;
+        changeset.tx_graph = tx_graph_changeset_from_postgres(db_tx, wallet_name).await?;
+        changeset.local_chain = local_chain_changeset_from_postgres(db_tx, wallet_name).await?;
         Ok(())
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn write(&self, changeset: &ChangeSet) -> Result<(), BdkSqlxError> {
         info!("changeset write");
         if changeset.is_empty() {
@@ -189,9 +189,9 @@ impl Store<Postgres> {
 }
 
 /// Insert keychain descriptors.
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx, descriptor))]
 async fn insert_descriptor(
-    tx: &mut Transaction<'_, Postgres>,
+    db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     descriptor: &ExtendedDescriptor,
     keychain: KeychainKind,
@@ -212,16 +212,16 @@ async fn insert_descriptor(
         .bind(keychain)
         .bind(descriptor_str)
         .bind(descriptor_id.as_slice())
-        .execute(&mut **tx)
+        .execute(&mut **db_tx)
         .await?;
 
     Ok(())
 }
 
 /// Insert network.
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx, network))]
 async fn insert_network(
-    tx: &mut Transaction<'_, Postgres>,
+    db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     network: Network,
 ) -> Result<(), BdkSqlxError> {
@@ -229,16 +229,16 @@ async fn insert_network(
     sqlx::query("INSERT INTO network (wallet_name, name) VALUES ($1, $2)")
         .bind(wallet_name)
         .bind(network.to_string())
-        .execute(&mut **tx)
+        .execute(&mut **db_tx)
         .await?;
 
     Ok(())
 }
 
 /// Update keychain last revealed
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx, descriptor_id, last_revealed))]
 async fn update_last_revealed(
-    tx: &mut Transaction<'_, Postgres>,
+    db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     descriptor_id: DescriptorId,
     last_revealed: u32,
@@ -251,14 +251,14 @@ async fn update_last_revealed(
     .bind(last_revealed as i32)
     .bind(wallet_name)
     .bind(descriptor_id.to_byte_array())
-    .execute(&mut **tx)
+    .execute(&mut **db_tx)
     .await?;
 
     Ok(())
 }
 
 /// Select transactions, txouts, and anchors.
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx))]
 pub async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -333,7 +333,7 @@ pub async fn tx_graph_changeset_from_postgres(
 }
 
 /// Insert transactions, txouts, and anchors.
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx, changeset))]
 pub async fn tx_graph_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -394,7 +394,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 }
 
 /// Select blocks.
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx))]
 pub async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -418,7 +418,7 @@ pub async fn local_chain_changeset_from_postgres(
 }
 
 /// Insert blocks.
-#[tracing::instrument]
+#[tracing::instrument(skip(db_tx, changeset))]
 pub async fn local_chain_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
