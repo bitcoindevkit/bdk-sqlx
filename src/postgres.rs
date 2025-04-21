@@ -183,27 +183,6 @@ impl PgStoreBuilder {
 }
 
 impl Store<Postgres> {
-    /// Construct a new [`Store`] with an existing pg connection.
-    // #[tracing::instrument(skip(pool, migrate))]
-    // pub async fn _new(pool: Pool<Postgres>, wallet_name: String, migrate: bool, network: Network) -> Result<Self> {
-    //     info!("new postgres store");
-    //     let store = Self { pool, wallet_name};
-    //     if migrate {
-    //         store.migrate().await?;
-    //     }
-    //
-    //     NETWORK.set(network).map_err(|network| BdkSqlxError::NetworkInitFailure(network.to_string()))?;
-    //
-    //     Ok(store)
-    // }
-
-    /// Construct a new [`Store`] without an existing pg connection.
-    // pub async fn _new_with_url(url: String, wallet_name: String, migrate: bool, network: Network) -> Result<Self> {
-    //     let pool = PgPool::connect(url.as_str()).await?;
-    //    let store = Self::new(pool, wallet_name, migrate, network).await?;
-    //     Ok(store)
-    // }
-    //
     /// Construct a new [`Store`] without an existing pg connection.
     #[tracing::instrument(skip_all)]
     pub async fn migrate(&self) -> Result<()> {
