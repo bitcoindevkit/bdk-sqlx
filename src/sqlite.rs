@@ -62,7 +62,7 @@ impl Store<Sqlite> {
         info!("new sqlite store");
         if migrate {
             info!("migrate");
-            migrate!("./migrations/postgres").run(&pool).await?;
+            migrate!("./migrations/sqlite").run(&pool).await?;
         }
         Ok(Self { pool, wallet_name })
     }

@@ -137,7 +137,7 @@ impl AsyncWalletPersister for TestStore {
     }
 }
 
-pub async fn drop_tables() -> anyhow::Result<()> {
+pub async fn _drop_tables() -> anyhow::Result<()> {
     let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
     let pool = Pool::<Postgres>::connect(&url.clone()).await?;
 
@@ -340,8 +340,6 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
             );
         }
     }
-
-    drop_tables().await?;
 
     Ok(())
 }
