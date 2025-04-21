@@ -5,7 +5,6 @@
 // Standard library imports
 use std::sync::OnceLock;
 use std::{str::FromStr, sync::Arc};
-
 // Third party crates
 use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
@@ -27,7 +26,7 @@ use sqlx::{
     postgres::{PgPool, PgRow, Postgres},
     FromRow, Pool, Row, Transaction,
 };
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 // First party imports
 use super::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
@@ -38,28 +37,32 @@ type Result<T> = core::result::Result<T, BdkSqlxError>;
 /// This ensures consistent network validation across multiple threads.
 static NETWORK: OnceLock<Network> = OnceLock::new();
 
-/// Get the current network configuration.
+/// Retrieves the current global network configuration for validation operations.
 ///
-/// # Panics
-///
-/// Panics if the network has not been initialized.
-fn get_network() -> Network {
-    NETWORK.get().copied().expect("network not initialized")
+/// Returns the current network configuration or an error if not initialized.
+fn get_network() -> Result<Network> {
+    NETWORK
+        .get()
+        .copied()
+        .ok_or_else(|| BdkSqlxError::GetNetworkFailure)
 }
 
-/// Initialize the global network configuration if not already set.
+/// Sets the global network configuration to ensure consistent validation across threads.
 ///
 /// Returns an error if the network is already initialized with a different network.
 fn initialize_network(network: Network) -> Result<()> {
     match NETWORK.get() {
-        Some(current) if *current == network => Ok(()),
-        Some(current) => Err(BdkSqlxError::NetworkInitFailure(format!(
-            "Network already initialized as {}, cannot change to {}",
-            current, network
-        ))),
+        Some(current) if *current == network => {
+            warn!("initialize_network called more than once");
+            Ok(())
+        }
+        Some(current) => Err(BdkSqlxError::DuplicateInitNetwork {
+            current: *current,
+            network,
+        }),
         None => NETWORK
             .set(network)
-            .map_err(|n| BdkSqlxError::NetworkInitFailure(n.to_string())),
+            .map_err(BdkSqlxError::SetNetworkFailure),
     }
 }
 
@@ -176,7 +179,7 @@ impl PgStoreBuilder {
     /// - Database connection fails
     /// - Any error that could occur in the build() method
     pub async fn build_with_url(self, url: &str) -> Result<Store<Postgres>> {
-        let pool = PgPool::connect(url).await.map_err(BdkSqlxError::Sqlx)?;
+        let pool = PgPool::connect(url).await?;
         let store = self.pool(pool).build().await?;
         Ok(store)
     }
@@ -192,7 +195,13 @@ impl Store<Postgres> {
 
         // Create the schema first
         let create_schema_query = r#"CREATE SCHEMA IF NOT EXISTS "bdk_wallet""#;
-        sqlx::query(create_schema_query).execute(&mut *tx).await?;
+        sqlx::query(create_schema_query)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "create schema bdk_wallet".to_string(),
+                source: e,
+            })?;
 
         // Create the tables one by one
         let queries = [
@@ -244,7 +253,13 @@ impl Store<Postgres> {
 
         // Execute each query separately
         for query in &queries {
-            sqlx::query(query).execute(&mut *tx).await?;
+            sqlx::query(query)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: query.to_string(),
+                    source: e,
+                })?;
         }
 
         tx.commit().await?;
@@ -271,7 +286,11 @@ impl Store<Postgres> {
         let row = sqlx::query(sql)
             .bind(&self.wallet_name)
             .fetch_optional(&mut *db_tx)
-            .await?;
+            .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "read".to_string(),
+                source: e,
+            })?;
 
         if let Some(row) = row {
             Self::changeset_from_row(&mut db_tx, &mut changeset, row, &self.wallet_name).await?;
@@ -298,7 +317,7 @@ impl Store<Postgres> {
         changeset.network =
             Some(
                 Network::from_str(&network).map_err(|got| BdkSqlxError::InvalidNetwork {
-                    expected: get_network().to_string(),
+                    expected: get_network().unwrap().to_string(),
                     got: got.to_string(),
                 })?,
             );
@@ -390,7 +409,11 @@ async fn insert_descriptor(
         .bind(descriptor_str)
         .bind(descriptor_id.as_slice())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert keychain".to_string(),
+            source: e,
+        })?;
 
     Ok(())
 }
@@ -407,7 +430,11 @@ async fn insert_network(
         .bind(wallet_name)
         .bind(network.to_string())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert network".to_string(),
+            source: e,
+        })?;
 
     Ok(())
 }
@@ -429,7 +456,11 @@ async fn update_last_revealed(
     .bind(wallet_name)
     .bind(descriptor_id.to_byte_array())
     .execute(&mut **db_tx)
-    .await?;
+    .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "update keychain".to_string(),
+            source: e,
+        })?;
 
     Ok(())
 }
@@ -449,7 +480,11 @@ pub async fn tx_graph_changeset_from_postgres(
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
-    .await?;
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "select tx".to_string(),
+        source: e,
+    })?;
 
     for row in rows {
         let txid: String = row.get("txid");
@@ -473,7 +508,11 @@ pub async fn tx_graph_changeset_from_postgres(
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
-    .await?;
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "select txout".to_string(),
+        source: e,
+    })?;
 
     for row in rows {
         let txid: String = row.get("txid");
@@ -499,7 +538,11 @@ pub async fn tx_graph_changeset_from_postgres(
         sqlx::query(r#"SELECT anchor, txid FROM "bdk_wallet"."anchor_tx" WHERE wallet_name = $1"#)
             .bind(wallet_name)
             .fetch_all(&mut **db_tx)
-            .await?;
+            .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "select anchor tx".to_string(),
+                source: e,
+            })?;
 
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
@@ -531,7 +574,11 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         .bind(tx.compute_txid().to_string())
         .bind(consensus::serialize(tx.as_ref()))
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert tx".to_string(),
+            source: e,
+        })?;
     }
 
     for (&txid, &last_seen) in &changeset.last_seen {
@@ -542,7 +589,11 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         .bind(wallet_name)
         .bind(txid.to_string())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "update tx".to_string(),
+            source: e,
+        })?;
     }
 
     for (op, txo) in &changeset.txouts {
@@ -556,7 +607,11 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         .bind(txo.value.to_sat() as i64)
         .bind(txo.script_pubkey.as_bytes())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "insert txout".to_string(),
+                source: e,
+            })?;
     }
 
     for (anchor, txid) in &changeset.anchors {
@@ -571,7 +626,11 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         .bind(anchor)
         .bind(txid.to_string())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "insert anchor tx".to_string(),
+                source: e,
+            })?;
     }
 
     Ok(())
@@ -590,7 +649,11 @@ pub async fn local_chain_changeset_from_postgres(
         sqlx::query(r#"SELECT hash, height FROM "bdk_wallet"."block" WHERE wallet_name = $1"#)
             .bind(wallet_name)
             .fetch_all(&mut **db_tx)
-            .await?;
+            .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "select block".to_string(),
+                source: e,
+            })?;
 
     for row in rows {
         let hash: String = row.get("hash");
@@ -621,7 +684,11 @@ pub async fn local_chain_changeset_persist_to_postgres(
                 .bind(hash.to_string())
                 .bind(height as i32)
                 .execute(&mut **db_tx)
-                .await?;
+                .await
+                    .map_err(|e| BdkSqlxError::QueryError {
+                        table: "insert block".to_string(),
+                        source: e,
+                    })?;
             }
             None => {
                 sqlx::query(
@@ -630,7 +697,11 @@ pub async fn local_chain_changeset_persist_to_postgres(
                 .bind(wallet_name)
                 .bind(height as i32)
                 .execute(&mut **db_tx)
-                .await?;
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "delete block".to_string(),
+                    source: e,
+                })?;
             }
         }
     }

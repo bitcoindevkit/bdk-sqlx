@@ -88,8 +88,6 @@ async fn main() -> anyhow::Result<()> {
     let wallet_name =
         bdk_wallet::wallet_name_from_descriptor(VAULT_DESC, Some(CHANGE_DESC), NETWORK, &secp)?;
 
-    // let mut store = PgStoreBuilder
-    //     bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name, true, NETWORK).await?;
     let mut store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
         .migrate(true)
@@ -112,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let addr = wallet.reveal_next_address(KeychainKind::External);
-    let _ = wallet.persist_async(&mut store).await?;
+    wallet.persist_async(&mut store).await?;
 
     println!(
         "2nd wallet address ({:?} {}) {}",
