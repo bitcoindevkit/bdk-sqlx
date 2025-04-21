@@ -220,6 +220,10 @@ impl Store<Postgres> {
 
         // Create the tables one by one
         let queries = [
+
+            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."version" (
+            version INTEGER PRIMARY KEY
+        )"#,
             r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."network" (
             wallet_name TEXT PRIMARY KEY,
             name TEXT NOT NULL
