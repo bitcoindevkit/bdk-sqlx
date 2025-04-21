@@ -38,7 +38,12 @@ pub enum BdkSqlxError {
     Migrate(#[from] sqlx::migrate::MigrateError),
     /// Network confusion
     #[error("Invalid Network expected {expected}, got {got}")]
-    InvalidNetwork { expected: String, got: String },
+    InvalidNetwork { 
+        /// Expected network
+        expected: String, 
+        /// Got network
+        got: String 
+    },
     /// Init failure
     #[error("Could not initialize network correctly with: {0}")]
     NetworkInitFailure(String),
