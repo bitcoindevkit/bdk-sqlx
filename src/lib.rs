@@ -53,19 +53,19 @@ pub enum BdkSqlxError {
         network: Network,
     },
     /// Init failure
-    #[error("Could not initialize network correctly with: {0}")]
+    #[error("Cant initialize network correctly with: {0}")]
     NetworkInitFailure(Network),
     /// Config error
     #[error("Network Missing")]
     MissingNetwork,
     /// Config error
-    #[error("Could not initialize Postgres connection")]
+    #[error("Cant initialize Postgres connection")]
     MissingPool,
     /// Config error
     #[error("Network Failed to set")]
     SetNetworkFailure(Network),
     /// Config error
-    #[error("Could not get network because its not set")]
+    #[error("Cant get network because its not set")]
     GetNetworkFailure,
     /// Query execution error
     #[error("Failed to execute query on {table}: {source}")]

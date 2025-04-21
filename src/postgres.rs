@@ -3,8 +3,7 @@
 #![warn(missing_docs)]
 
 // Standard library imports
-use std::sync::OnceLock;
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::{OnceLock, Arc}};
 // Third party crates
 use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
@@ -94,9 +93,25 @@ impl AsyncWalletPersister for Store<Postgres> {
 impl PgStoreBuilder {
     /// Creates a new builder for a [`Store`] with the given wallet name.
     ///
-    /// This initializes a builder with default values where the pool and network
-    /// are set to None and migrate is set to false. These values must be configured
-    /// before building the store.
+    /// # Required fields
+    /// Before building, you must set:
+    /// - `network` - The Bitcoin network to use
+    /// - Either provide a connection pool with `pool()` or a database URL with `build_with_url()`
+    ///
+    /// # Example
+    /// ```
+    /// # async fn example() -> Result<(), bdk_sqlx::BdkSqlxError> {
+    /// use bdk_wallet::bitcoin::Network;
+    /// use bdk_sqlx::PgStoreBuilder;
+    ///
+    /// let store = PgStoreBuilder::new("bdk_wallet_name".to_string())
+    ///     .network(Network::Testnet)
+    ///     .migrate(true)
+    ///     .build_with_url("postgres://username:password@localhost/database")
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[tracing::instrument]
     pub fn new(wallet_name: String) -> Self {
         Self {
@@ -186,7 +201,7 @@ impl PgStoreBuilder {
 }
 
 impl Store<Postgres> {
-    /// Construct a new [`Store`] without an existing pg connection.
+    /// Runs Migrations for a [`Store`] without an existing pg connection.
     #[tracing::instrument(skip_all)]
     pub async fn migrate(&self) -> Result<()> {
         trace!("migrating bdk sqlx");
@@ -261,6 +276,21 @@ impl Store<Postgres> {
                     source: e,
                 })?;
         }
+
+        // At the end of migration, insert the current version
+        // After all tables are created but before tx.commit()
+        sqlx::query(
+            r#"INSERT INTO "bdk_wallet"."version" (version) 
+               VALUES ($1) 
+               ON CONFLICT (version) DO NOTHING"#,
+        )
+        .bind(1) // Current schema version
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert version".to_string(),
+            source: e,
+        })?;
 
         tx.commit().await?;
 
