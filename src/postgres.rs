@@ -3,7 +3,10 @@
 #![warn(missing_docs)]
 
 // Standard library imports
-use std::{str::FromStr, sync::{OnceLock, Arc}};
+use std::{
+    str::FromStr,
+    sync::{Arc, OnceLock},
+};
 // Third party crates
 use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
@@ -220,7 +223,6 @@ impl Store<Postgres> {
 
         // Create the tables one by one
         let queries = [
-
             r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."version" (
             version INTEGER PRIMARY KEY
         )"#,
