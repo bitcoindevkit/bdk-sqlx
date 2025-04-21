@@ -36,16 +36,16 @@ pub enum BdkSqlxError {
     /// migrate error
     #[error("migrate error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
-    // Network confusion
+    /// Network confusion
     #[error("Invalid Network expected {expected}, got {got}")]
     InvalidNetwork { expected: String, got: String },
-    // Init failure
+    /// Init failure
     #[error("Could not initialize network correctly with: {0}")]
     NetworkInitFailure(String),
-    // Config error
+    /// Config error
     #[error("Network Missing")]
     MissingNetwork,
-    // Config error
+    /// Config error
     #[error("Could not initialize Postgres connection")]
     MissingPool,
 }
