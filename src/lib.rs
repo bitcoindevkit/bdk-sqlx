@@ -12,10 +12,11 @@ use std::future::Future;
 use std::pin::Pin;
 
 use bdk_wallet::bitcoin;
+use bdk_wallet::bitcoin::Network;
 use bdk_wallet::chain::miniscript;
 pub use sqlx;
-use sqlx::Database;
 use sqlx::Pool;
+use sqlx::{Database, PgPool};
 
 /// Crate error
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +36,14 @@ pub enum BdkSqlxError {
     /// migrate error
     #[error("migrate error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    #[error("Invalid Network expected {expected}, got {got}")]
+    InvalidNetwork { expected: String, got: String },
+    #[error("Could not initialize network correctly with: {0}")]
+    NetworkInitFailure(String),
+    #[error("Network Missing")]
+    MissingNetwork,
+    #[error("Could not initialize Postgres connection")]
+    MissingPool,
 }
 
 /// Manages a pool of database connections.
@@ -42,6 +51,14 @@ pub enum BdkSqlxError {
 pub struct Store<DB: Database> {
     pub(crate) pool: Pool<DB>,
     wallet_name: String,
+}
+
+// Add a new struct
+pub struct PgStoreBuilder {
+    wallet_name: String,
+    pool: Option<PgPool>,
+    migrate: bool,
+    network: Option<Network>,
 }
 
 type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;

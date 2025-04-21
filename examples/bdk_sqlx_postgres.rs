@@ -4,7 +4,7 @@ use std::io::Write;
 
 use bdk_electrum::{electrum_client, BdkElectrumClient};
 use bdk_sqlx::sqlx::Postgres;
-use bdk_sqlx::Store;
+use bdk_sqlx::{PgStoreBuilder, Store};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
@@ -56,8 +56,12 @@ async fn main() -> anyhow::Result<()> {
         NETWORK,
         &secp,
     )?;
-    let mut store =
-        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name, true).await?;
+
+    let mut store = PgStoreBuilder::new(wallet_name.clone())
+        .network(NETWORK)
+        .migrate(true)
+        .build_with_url(&url)
+        .await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,
@@ -84,8 +88,13 @@ async fn main() -> anyhow::Result<()> {
     let wallet_name =
         bdk_wallet::wallet_name_from_descriptor(VAULT_DESC, Some(CHANGE_DESC), NETWORK, &secp)?;
 
-    let mut store =
-        bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name, true).await?;
+    // let mut store = PgStoreBuilder
+    //     bdk_sqlx::Store::<Postgres>::new_with_url(url.clone(), wallet_name, true, NETWORK).await?;
+    let mut store = PgStoreBuilder::new(wallet_name.clone())
+        .network(NETWORK)
+        .migrate(true)
+        .build_with_url(&url)
+        .await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,

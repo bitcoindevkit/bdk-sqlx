@@ -2,8 +2,11 @@
 
 #![warn(missing_docs)]
 
+// Standard library imports
+use std::sync::OnceLock;
 use std::{str::FromStr, sync::Arc};
 
+// Third party crates
 use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
 };
@@ -26,9 +29,39 @@ use sqlx::{
 };
 use tracing::{info, trace};
 
-use super::{BdkSqlxError, FutureResult, Store};
+// First party imports
+use super::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
 
 type Result<T> = core::result::Result<T, BdkSqlxError>;
+
+/// Thread-safe storage for the network configuration that's shared across all Store instances.
+/// This ensures consistent network validation across multiple threads.
+static NETWORK: OnceLock<Network> = OnceLock::new();
+
+/// Get the current network configuration.
+///
+/// # Panics
+///
+/// Panics if the network has not been initialized.
+fn get_network() -> Network {
+    NETWORK.get().copied().expect("network not initialized")
+}
+
+/// Initialize the global network configuration if not already set.
+///
+/// Returns an error if the network is already initialized with a different network.
+fn initialize_network(network: Network) -> Result<()> {
+    match NETWORK.get() {
+        Some(current) if *current == network => Ok(()),
+        Some(current) => Err(BdkSqlxError::NetworkInitFailure(format!(
+            "Network already initialized as {}, cannot change to {}",
+            current, network
+        ))),
+        None => NETWORK
+            .set(network)
+            .map_err(|n| BdkSqlxError::NetworkInitFailure(n.to_string())),
+    }
+}
 
 impl AsyncWalletPersister for Store<Postgres> {
     type Error = BdkSqlxError;
@@ -55,24 +88,122 @@ impl AsyncWalletPersister for Store<Postgres> {
     }
 }
 
-impl Store<Postgres> {
-    /// Construct a new [`Store`] with an existing pg connection.
-    #[tracing::instrument(skip(pool, migrate))]
-    pub async fn new(pool: Pool<Postgres>, wallet_name: String, migrate: bool) -> Result<Self> {
-        info!("new postgres store");
-        let store = Self { pool, wallet_name };
-        if migrate {
-            store.migrate().await?;
+impl PgStoreBuilder {
+    /// Creates a new builder for a [`Store`] with the given wallet name.
+    ///
+    /// This initializes a builder with default values where the pool and network
+    /// are set to None and migrate is set to false. These values must be configured
+    /// before building the store.
+    #[tracing::instrument]
+    pub fn new(wallet_name: String) -> Self {
+        Self {
+            wallet_name,
+            pool: None,
+            migrate: false,
+            network: None,
         }
+    }
+
+    /// Sets the database connection pool for the [`Store`].
+    ///
+    /// The pool is required to build a valid [`Store`]. If not provided,
+    /// the build operation will fail with a MissingPool error.
+    pub fn pool(mut self, pool: Pool<Postgres>) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Sets whether database migrations should be run during [`Store`] initialization.
+    ///
+    /// When set to true, the necessary database schema and tables will be created
+    /// if they don't already exist.
+    pub fn migrate(mut self, migrate: bool) -> Self {
+        self.migrate = migrate;
+        self
+    }
+
+    /// Sets the Bitcoin network for the [`Store`].
+    ///
+    /// The network is required to build a valid [`Store`]. If not provided,
+    /// the build operation will fail with a MissingNetwork error.
+    pub fn network(mut self, network: Network) -> Self {
+        self.network = Some(network);
+        self
+    }
+
+    /// Builds the [`Store`] with the configured options.
+    ///
+    /// This method creates a new [`Store`] instance using the options that have been
+    /// set on this builder. It requires both a network and a pool to be specified
+    /// before building.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No network has been specified (MissingNetwork)
+    /// - No pool has been specified (MissingPool)
+    /// - Migration fails
+    /// - Network initialization fails
+    pub async fn build(self) -> Result<Store<Postgres>> {
+        let network = self.network.ok_or_else(|| BdkSqlxError::MissingNetwork)?;
+
+        match self.pool {
+            Some(pool) => {
+                let store = Store {
+                    pool,
+                    wallet_name: self.wallet_name,
+                };
+                if self.migrate {
+                    store.migrate().await?;
+                }
+
+                initialize_network(network)?;
+
+                Ok(store)
+            }
+            None => Err(BdkSqlxError::MissingPool),
+        }
+    }
+
+    /// Builds the [`Store`] with a new connection pool created from the provided URL.
+    ///
+    /// This is a convenience method that creates a connection pool from the URL
+    /// and then builds the [`Store`] using that pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Database connection fails
+    /// - Any error that could occur in the build() method
+    pub async fn build_with_url(self, url: &str) -> Result<Store<Postgres>> {
+        let pool = PgPool::connect(url).await.map_err(BdkSqlxError::Sqlx)?;
+        let store = self.pool(pool).build().await?;
         Ok(store)
     }
+}
+
+impl Store<Postgres> {
+    /// Construct a new [`Store`] with an existing pg connection.
+    // #[tracing::instrument(skip(pool, migrate))]
+    // pub async fn _new(pool: Pool<Postgres>, wallet_name: String, migrate: bool, network: Network) -> Result<Self> {
+    //     info!("new postgres store");
+    //     let store = Self { pool, wallet_name};
+    //     if migrate {
+    //         store.migrate().await?;
+    //     }
+    //
+    //     NETWORK.set(network).map_err(|network| BdkSqlxError::NetworkInitFailure(network.to_string()))?;
+    //
+    //     Ok(store)
+    // }
 
     /// Construct a new [`Store`] without an existing pg connection.
-    pub async fn new_with_url(url: String, wallet_name: String, migrate: bool) -> Result<Self> {
-        let pool = PgPool::connect(url.as_str()).await?;
-        Self::new(pool, wallet_name, migrate).await
-    }
-
+    // pub async fn _new_with_url(url: String, wallet_name: String, migrate: bool, network: Network) -> Result<Self> {
+    //     let pool = PgPool::connect(url.as_str()).await?;
+    //    let store = Self::new(pool, wallet_name, migrate, network).await?;
+    //     Ok(store)
+    // }
+    //
     /// Construct a new [`Store`] without an existing pg connection.
     #[tracing::instrument(skip_all)]
     pub async fn migrate(&self) -> Result<()> {
@@ -185,7 +316,13 @@ impl Store<Postgres> {
         let internal_desc_str: Option<String> = row.get("internal_descriptor");
         let external_desc_str: Option<String> = row.get("external_descriptor");
 
-        changeset.network = Some(Network::from_str(&network).expect("parse Network"));
+        changeset.network =
+            Some(
+                Network::from_str(&network).map_err(|got| BdkSqlxError::InvalidNetwork {
+                    expected: get_network().to_string(),
+                    got: got.to_string(),
+                })?,
+            );
 
         if let Some(desc_str) = external_desc_str {
             let descriptor: Descriptor<DescriptorPublicKey> = desc_str.parse()?;
