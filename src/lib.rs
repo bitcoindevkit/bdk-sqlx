@@ -5,11 +5,9 @@
 mod postgres;
 mod sqlite;
 
+pub mod pg_store_builder;
 #[cfg(test)]
 mod test;
-
-use std::future::Future;
-use std::pin::Pin;
 
 use bdk_wallet::bitcoin;
 use bdk_wallet::bitcoin::Network;
@@ -17,6 +15,45 @@ use bdk_wallet::chain::miniscript;
 pub use sqlx;
 use sqlx::Pool;
 use sqlx::{Database, PgPool};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::OnceLock;
+use tracing::warn;
+
+pub type Result<T> = core::result::Result<T, BdkSqlxError>;
+
+/// Thread-safe storage for the network configuration that's shared across all Store instances.
+/// This ensures consistent network validation across multiple threads.
+static NETWORK: OnceLock<Network> = OnceLock::new();
+
+/// Retrieves the current global network configuration for validation operations.
+///
+/// Returns the current network configuration or an error if not initialized.
+fn get_network() -> Result<Network> {
+    NETWORK
+        .get()
+        .copied()
+        .ok_or_else(|| BdkSqlxError::GetNetworkFailure)
+}
+
+/// Sets the global network configuration to ensure consistent validation across threads.
+///
+/// Returns an error if the network is already initialized with a different network.
+fn initialize_network(network: Network) -> Result<()> {
+    match NETWORK.get() {
+        Some(current) if *current == network => {
+            warn!("initialize_network called more than once");
+            Ok(())
+        }
+        Some(current) => Err(BdkSqlxError::DuplicateInitNetwork {
+            current: *current,
+            network,
+        }),
+        None => NETWORK
+            .set(network)
+            .map_err(BdkSqlxError::SetNetworkFailure),
+    }
+}
 
 /// Crate error
 #[derive(Debug, thiserror::Error)]
@@ -81,11 +118,4 @@ pub struct Store<DB: Database> {
     wallet_name: String,
 }
 
-/// Build a new instance of the PgStoreBuilder
-pub struct PgStoreBuilder {
-    wallet_name: String,
-    pool: Option<PgPool>,
-    network: Option<Network>,
-}
-
-type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
+type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>;

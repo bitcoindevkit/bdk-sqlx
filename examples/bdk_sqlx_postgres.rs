@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use bdk_electrum::{electrum_client, BdkElectrumClient};
+use bdk_sqlx::pg_store_builder::PgStoreBuilder;
 use bdk_sqlx::sqlx::Postgres;
-use bdk_sqlx::{PgStoreBuilder, Store};
+use bdk_sqlx::Store;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
@@ -12,7 +13,6 @@ use rustls::crypto::ring::default_provider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
-
 // Create and persist a BDK wallet to postgres.
 
 // wallet 1
@@ -59,7 +59,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
-        .build_with_url(&url)
+        .url(&url)
+        .build()
         .await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {
@@ -89,7 +90,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
-        .build_with_url(&url)
+        .url(&url)
+        .build()
         .await?;
 
     let mut wallet = match Wallet::load().load_wallet_async(&mut store).await? {

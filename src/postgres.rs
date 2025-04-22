@@ -31,42 +31,7 @@ use sqlx::{
 use tracing::{info, trace, warn};
 
 // First party imports
-use super::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
-
-type Result<T> = core::result::Result<T, BdkSqlxError>;
-
-/// Thread-safe storage for the network configuration that's shared across all Store instances.
-/// This ensures consistent network validation across multiple threads.
-static NETWORK: OnceLock<Network> = OnceLock::new();
-
-/// Retrieves the current global network configuration for validation operations.
-///
-/// Returns the current network configuration or an error if not initialized.
-fn get_network() -> Result<Network> {
-    NETWORK
-        .get()
-        .copied()
-        .ok_or_else(|| BdkSqlxError::GetNetworkFailure)
-}
-
-/// Sets the global network configuration to ensure consistent validation across threads.
-///
-/// Returns an error if the network is already initialized with a different network.
-fn initialize_network(network: Network) -> Result<()> {
-    match NETWORK.get() {
-        Some(current) if *current == network => {
-            warn!("initialize_network called more than once");
-            Ok(())
-        }
-        Some(current) => Err(BdkSqlxError::DuplicateInitNetwork {
-            current: *current,
-            network,
-        }),
-        None => NETWORK
-            .set(network)
-            .map_err(BdkSqlxError::SetNetworkFailure),
-    }
-}
+use super::{get_network, BdkSqlxError, FutureResult, Store};
 
 impl AsyncWalletPersister for Store<Postgres> {
     type Error = BdkSqlxError;
@@ -93,107 +58,9 @@ impl AsyncWalletPersister for Store<Postgres> {
     }
 }
 
-impl PgStoreBuilder {
-    /// Creates a new builder for a [`Store`] with the given wallet name.
-    ///
-    /// # Required fields
-    /// Before building, you must set:
-    /// - `network` - The Bitcoin network to use
-    /// - Either provide a connection pool with `pool()` or a database URL with `build_with_url()`
-    ///
-    /// # Example
-    /// ```
-    /// # async fn example() -> Result<(), bdk_sqlx::BdkSqlxError> {
-    /// use bdk_wallet::bitcoin::Network;
-    /// use bdk_sqlx::PgStoreBuilder;
-    ///
-    /// let store = PgStoreBuilder::new("bdk_wallet_name".to_string())
-    ///     .network(Network::Testnet)
-    ///     .migrate(true)
-    ///     .build_with_url("postgres://username:password@localhost/database")
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tracing::instrument]
-    pub fn new(wallet_name: String) -> Self {
-        Self {
-            wallet_name,
-            pool: None,
-            network: None,
-        }
-    }
-
-    /// Sets the database connection pool for the [`Store`].
-    ///
-    /// The pool is required to build a valid [`Store`]. If not provided,
-    /// the build operation will fail with a MissingPool error.
-    pub fn pool(mut self, pool: Pool<Postgres>) -> Self {
-        self.pool = Some(pool);
-        self
-    }
-
-    /// Sets the Bitcoin network for the [`Store`].
-    ///
-    /// The network is required to build a valid [`Store`]. If not provided,
-    /// the build operation will fail with a MissingNetwork error.
-    pub fn network(mut self, network: Network) -> Self {
-        self.network = Some(network);
-        self
-    }
-
-    /// Builds the [`Store`] with the configured options.
-    ///
-    /// This method creates a new [`Store`] instance using the options that have been
-    /// set on this builder. It requires both a network and a pool to be specified
-    /// before building.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - No network has been specified (MissingNetwork)
-    /// - No pool has been specified (MissingPool)
-    /// - Migration fails
-    /// - Network initialization fails
-    pub async fn build(self) -> Result<Store<Postgres>> {
-        let network = self.network.ok_or_else(|| BdkSqlxError::MissingNetwork)?;
-
-        match self.pool {
-            Some(pool) => {
-                let store = Store {
-                    pool,
-                    wallet_name: self.wallet_name,
-                };
-
-                initialize_network(network)?;
-
-                Ok(store)
-            }
-            None => Err(BdkSqlxError::MissingPool),
-        }
-    }
-
-    /// Builds the [`Store`] with a new connection pool created from the provided URL.
-    ///
-    /// This is a convenience method that creates a connection pool from the URL
-    /// and then builds the [`Store`] using that pool.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Database connection fails
-    /// - Any error that could occur in the build() method
-    pub async fn build_with_url(self, url: &str) -> Result<Store<Postgres>> {
-        let pool = PgPool::connect(url).await?;
-        let store = self.pool(pool).build().await?;
-        Ok(store)
-    }
-}
-
-
 impl Store<Postgres> {
     #[tracing::instrument(skip_all)]
-    pub(crate) async fn read(&self) -> Result<ChangeSet> {
+    pub(crate) async fn read(&self) -> crate::Result<ChangeSet> {
         trace!("reading");
         let mut db_tx = self.pool.begin().await?;
         let mut changeset = ChangeSet::default();
@@ -228,7 +95,7 @@ impl Store<Postgres> {
         changeset: &mut ChangeSet,
         row: PgRow,
         wallet_name: &str,
-    ) -> Result<()> {
+    ) -> crate::Result<()> {
         trace!("changeset from row");
 
         let network: String = row.get("network");
@@ -269,7 +136,7 @@ impl Store<Postgres> {
     }
 
     #[tracing::instrument(skip_all)]
-    pub(crate) async fn write(&self, changeset: &ChangeSet) -> Result<()> {
+    pub(crate) async fn write(&self, changeset: &ChangeSet) -> crate::Result<()> {
         trace!("changeset write");
         if changeset.is_empty() {
             return Ok(());
@@ -314,7 +181,7 @@ async fn insert_descriptor(
     wallet_name: &str,
     descriptor: &ExtendedDescriptor,
     keychain: KeychainKind,
-) -> Result<()> {
+) -> crate::Result<()> {
     trace!("insert descriptor");
     let descriptor_str = descriptor.to_string();
 
@@ -347,7 +214,7 @@ async fn insert_network(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     network: Network,
-) -> Result<()> {
+) -> crate::Result<()> {
     trace!("insert network");
     sqlx::query(r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2)"#)
         .bind(wallet_name)
@@ -369,7 +236,7 @@ async fn update_last_revealed(
     wallet_name: &str,
     descriptor_id: DescriptorId,
     last_revealed: u32,
-) -> Result<()> {
+) -> crate::Result<()> {
     trace!("update last revealed");
 
     sqlx::query(
@@ -393,7 +260,7 @@ async fn update_last_revealed(
 pub async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
-) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>> {
+) -> crate::Result<tx_graph::ChangeSet<ConfirmationBlockTime>> {
     trace!("tx graph changeset from postgres");
     let mut changeset = tx_graph::ChangeSet::default();
 
@@ -486,7 +353,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     changeset: &tx_graph::ChangeSet<ConfirmationBlockTime>,
-) -> Result<()> {
+) -> crate::Result<()> {
     trace!("tx graph changeset from postgres");
     for tx in &changeset.txs {
         sqlx::query(
@@ -564,7 +431,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 pub async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
-) -> Result<local_chain::ChangeSet> {
+) -> crate::Result<local_chain::ChangeSet> {
     trace!("local chain changeset from postgres");
     let mut changeset = local_chain::ChangeSet::default();
 
@@ -594,7 +461,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     changeset: &local_chain::ChangeSet,
-) -> Result<()> {
+) -> crate::Result<()> {
     trace!("local chain changeset to postgres");
     for (&height, &hash) in &changeset.blocks {
         match hash {
@@ -634,7 +501,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
 
 /// Collects information on all the wallets in the database and dumps it to stdout.
 #[tracing::instrument]
-pub async fn easy_backup(db: Pool<Postgres>) -> Result<()> {
+pub async fn easy_backup(db: Pool<Postgres>) -> crate::Result<()> {
     trace!("Starting easy backup");
 
     let statement = r#"SELECT * FROM "bdk_wallet"."keychain""#;

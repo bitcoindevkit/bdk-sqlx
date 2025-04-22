@@ -29,7 +29,8 @@ use test_utils::{
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
+use crate::pg_store_builder::PgStoreBuilder;
+use crate::{BdkSqlxError, FutureResult, Store};
 
 pub fn get_test_minisicript_with_change_desc() -> (&'static str, &'static str) {
     ("wsh(andor(multi(2,[a0d3c79c/48'/1'/79'/2']tpubDEsGdqFaKUVnVNZZw8AixJ8C3yD8o6nN7hsdLfbtVRDTk3PNrQ2pcWNWNbxhdcNSgQP25pUpgRQ7qiVtN3YvSzACKizrvzSwH9SQ2Bjbbwt/0/*,[ea2484f9/48'/1'/79'/2']tpubDFjkswBXoRHKkvmHsxv4xdDqbjg1peX9zJytLeSLbXuwVgYhXgbABzC2r5MAWxqWoaUr7hWGW5TPjA9sNvxa3mX6DrNBdynDsEvwDoXGFpm/0/*,[93f245d7/48'/1'/79'/2']tpubDEVnR72gRgTsqaPFMacV6fCfaSEe56gcDomuGhk9MFeUdEi18riJCokgsZr2x1KKGRM59TJ4AQ6FuNun3khh95ceoH2ytN13nVD7yDLP5LJ/0/*),or_i(and_v(v:pkh([61cdf766/48'/1'/79'/2']tpubDEXETCw2WurhazfW5gW1z4njP6yLXDQmCGfjWGP5k3BuTQ5iZqovMr1zz1zWPhDMRn11hXGpZHodus1LysXnwREsD1ig96M24JhQCpPPpf6/0/*),after(1753228800)),thresh(2,pk([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/0/*),s:pk([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/0/*),s:pk([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/0/*),snl:after(1739836800))),and_v(v:thresh(2,pkh([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/2/*),a:pkh([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/2/*),a:pkh([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/2/*)),after(1757116800))))",
@@ -137,23 +138,20 @@ impl AsyncWalletPersister for TestStore {
     }
 }
 
-pub async fn _drop_tables() -> anyhow::Result<()> {
+pub async fn drop_tables() -> anyhow::Result<()> {
     let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
     let pool = Pool::<Postgres>::connect(&url.clone()).await?;
 
     let mut tx = pool.begin().await?;
 
-    // Drop tables in reverse order of creation to handle foreign key constraints
+    // Truncate tables in reverse order of creation to handle foreign key constraints
     let queries = [
-        r#"DROP INDEX IF EXISTS "bdk_wallet"."idx_anchor_tx_txid""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."anchor_tx""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."txout""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."tx""#,
-        r#"DROP INDEX IF EXISTS "bdk_wallet"."idx_block_height""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."block""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."keychain""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."network""#,
-        r#"DROP SCHEMA IF EXISTS "bdk_wallet" CASCADE"#,
+        r#"TRUNCATE TABLE "bdk_wallet"."anchor_tx" CASCADE"#,
+        r#"TRUNCATE TABLE "bdk_wallet"."txout" CASCADE"#,
+        r#"TRUNCATE TABLE "bdk_wallet"."tx" CASCADE"#,
+        r#"TRUNCATE TABLE "bdk_wallet"."block" CASCADE"#,
+        r#"TRUNCATE TABLE "bdk_wallet"."keychain" CASCADE"#,
+        r#"TRUNCATE TABLE "bdk_wallet"."network" CASCADE"#,
     ];
 
     // Execute each query separately
@@ -177,7 +175,8 @@ async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore
     pool.drop_all().await?;
     let postgres_store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
-        .build_with_url(&url)
+        .url(&url)
+        .build()
         .await?;
     stores.push(TestStore::Postgres(postgres_store));
 
@@ -340,6 +339,8 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
         }
     }
 
+    drop_tables().await?;
+
     Ok(())
 }
 
@@ -436,6 +437,9 @@ async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
         let loaded_balance = wallet.balance();
         assert_eq!(saved_balance, loaded_balance);
     }
+
+    drop_tables().await?;
+
     Ok(())
 }
 
@@ -498,6 +502,9 @@ async fn wallet_load_checks() -> anyhow::Result<()> {
                 "unexpected genesis hash check result: mainnet hash (check) is not testnet hash (loaded)");
         }
     }
+
+    drop_tables().await?;
+
     Ok(())
 }
 
@@ -544,6 +551,9 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
             );
         }
     }
+
+    drop_tables().await?;
+
     Ok(())
 }
 
@@ -629,5 +639,8 @@ async fn two_wallets_load() -> anyhow::Result<()> {
             "different wallets should not have same chain tip"
         );
     }
+
+    drop_tables().await?;
+
     Ok(())
 }

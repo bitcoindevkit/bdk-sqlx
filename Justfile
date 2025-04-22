@@ -16,3 +16,7 @@ stop-postgres:
 #   DATABASE_URL: postgres://postgres:password@localhost:5432/mydatabase
 example:
     cargo run --example bdk_sqlx_postgres
+
+# Database migration
+run-migrations:
+    sqlx migrate run --source migrations/postgres

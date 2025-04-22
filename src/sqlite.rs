@@ -53,10 +53,7 @@ impl AsyncWalletPersister for Store<Sqlite> {
 impl Store<Sqlite> {
     /// Construct a new [`Store`] with an existing sqlite connection pool.
     #[tracing::instrument]
-    pub async fn new(
-        pool: Pool<Sqlite>,
-        wallet_name: String,
-    ) -> Result<Self, BdkSqlxError> {
+    pub async fn new(pool: Pool<Sqlite>, wallet_name: String) -> Result<Self, BdkSqlxError> {
         info!("new sqlite store");
         Ok(Self { pool, wallet_name })
     }

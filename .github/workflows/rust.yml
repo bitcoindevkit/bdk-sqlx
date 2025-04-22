@@ -39,6 +39,8 @@ jobs:
       - name: Create database
         run: |
           sudo apt-get install libpq-dev -y
+          # Install sqlx-cli
+          cargo install sqlx-cli --no-default-features --features native-tls,postgres
           psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
           psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
       - name: Test wallet_is_persisted
@@ -68,6 +70,9 @@ jobs:
       - name: Create database
         run: |
           sudo apt-get install libpq-dev -y
+            # Install sqlx-cli
+          cargo install sqlx-cli --no-default-features --features native-tls,postgres
+          
           psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
           psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
       - name: Test test_three_wallets_list_transactions
