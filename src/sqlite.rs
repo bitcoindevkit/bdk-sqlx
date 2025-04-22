@@ -22,7 +22,6 @@ use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
 use serde_json::json;
 use sqlx::sqlite::SqliteRow;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use sqlx::sqlx_macros::migrate;
 use sqlx::{sqlite::Sqlite, FromRow, Pool, Row, Transaction};
 use tracing::info;
 
@@ -57,13 +56,8 @@ impl Store<Sqlite> {
     pub async fn new(
         pool: Pool<Sqlite>,
         wallet_name: String,
-        migrate: bool,
     ) -> Result<Self, BdkSqlxError> {
         info!("new sqlite store");
-        if migrate {
-            info!("migrate");
-            migrate!("./migrations/sqlite").run(&pool).await?;
-        }
         Ok(Self { pool, wallet_name })
     }
 
@@ -77,7 +71,6 @@ impl Store<Sqlite> {
     pub async fn new_with_url(
         url: Option<String>,
         wallet_name: String,
-        migrate: bool,
     ) -> Result<Store<Sqlite>, BdkSqlxError> {
         info!("new store with url");
         let pool = if let Some(url) = url {
@@ -92,7 +85,7 @@ impl Store<Sqlite> {
                 .connect(":memory:")
                 .await?
         };
-        Self::new(pool, wallet_name, migrate).await
+        Self::new(pool, wallet_name).await
     }
 }
 

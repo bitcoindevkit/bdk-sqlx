@@ -33,9 +33,6 @@ pub enum BdkSqlxError {
     /// sqlx error
     #[error("sqlx error: {0}")]
     Sqlx(#[from] sqlx::Error),
-    /// migrate error
-    #[error("migrate error: {0}")]
-    Migrate(#[from] sqlx::migrate::MigrateError),
     /// Network confusion
     #[error("Invalid Network expected {expected}, got {got}")]
     InvalidNetwork {
@@ -88,7 +85,6 @@ pub struct Store<DB: Database> {
 pub struct PgStoreBuilder {
     wallet_name: String,
     pool: Option<PgPool>,
-    migrate: bool,
     network: Option<Network>,
 }
 

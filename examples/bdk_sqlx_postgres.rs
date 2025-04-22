@@ -59,7 +59,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
-        .migrate(true)
         .build_with_url(&url)
         .await?;
 
@@ -90,7 +89,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
-        .migrate(true)
         .build_with_url(&url)
         .await?;
 

@@ -120,7 +120,6 @@ impl PgStoreBuilder {
         Self {
             wallet_name,
             pool: None,
-            migrate: false,
             network: None,
         }
     }
@@ -131,15 +130,6 @@ impl PgStoreBuilder {
     /// the build operation will fail with a MissingPool error.
     pub fn pool(mut self, pool: Pool<Postgres>) -> Self {
         self.pool = Some(pool);
-        self
-    }
-
-    /// Sets whether database migrations should be run during [`Store`] initialization.
-    ///
-    /// When set to true, the necessary database schema and tables will be created
-    /// if they don't already exist.
-    pub fn migrate(mut self, migrate: bool) -> Self {
-        self.migrate = migrate;
         self
     }
 
@@ -174,9 +164,6 @@ impl PgStoreBuilder {
                     pool,
                     wallet_name: self.wallet_name,
                 };
-                if self.migrate {
-                    store.migrate().await?;
-                }
 
                 initialize_network(network)?;
 
@@ -203,106 +190,6 @@ impl PgStoreBuilder {
     }
 }
 
-impl Store<Postgres> {
-    /// Runs Migrations for a [`Store`] without an existing pg connection.
-    #[tracing::instrument(skip_all)]
-    pub async fn migrate(&self) -> Result<()> {
-        trace!("migrating bdk sqlx");
-
-        let mut tx = self.pool.begin().await?;
-
-        // Create the schema first
-        let create_schema_query = r#"CREATE SCHEMA IF NOT EXISTS "bdk_wallet""#;
-        sqlx::query(create_schema_query)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| BdkSqlxError::QueryError {
-                table: "create schema bdk_wallet".to_string(),
-                source: e,
-            })?;
-
-        // Create the tables one by one
-        let queries = [
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."version" (
-            version INTEGER PRIMARY KEY
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."network" (
-            wallet_name TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."keychain" (
-            wallet_name TEXT NOT NULL,
-            keychainkind TEXT NOT NULL,
-            descriptor TEXT NOT NULL,
-            descriptor_id BYTEA NOT NULL,
-            last_revealed INTEGER DEFAULT 0,
-            PRIMARY KEY (wallet_name, keychainkind)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."block" (
-            wallet_name TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            height INTEGER NOT NULL,
-            PRIMARY KEY (wallet_name, hash)
-        )"#,
-            r#"CREATE INDEX IF NOT EXISTS idx_block_height ON "bdk_wallet"."block" (height)"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."tx" (
-            wallet_name TEXT NOT NULL,
-            txid TEXT NOT NULL,
-            whole_tx BYTEA,
-            last_seen BIGINT,
-            PRIMARY KEY (wallet_name, txid)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."txout" (
-            wallet_name TEXT NOT NULL,
-            txid TEXT NOT NULL,
-            vout INTEGER NOT NULL,
-            value BIGINT NOT NULL,
-            script BYTEA NOT NULL,
-            PRIMARY KEY (wallet_name, txid, vout)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."anchor_tx" (
-            wallet_name TEXT NOT NULL,
-            block_hash TEXT NOT NULL,
-            anchor JSONB NOT NULL,
-            txid TEXT NOT NULL,
-            PRIMARY KEY (wallet_name, block_hash, txid),
-            FOREIGN KEY (wallet_name, block_hash) REFERENCES "bdk_wallet"."block"(wallet_name, hash),
-            FOREIGN KEY (wallet_name, txid) REFERENCES "bdk_wallet"."tx"(wallet_name, txid)
-        )"#,
-            r#"CREATE INDEX IF NOT EXISTS idx_anchor_tx_txid ON "bdk_wallet"."anchor_tx" (txid)"#,
-        ];
-
-        // Execute each query separately
-        for query in &queries {
-            sqlx::query(query)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| BdkSqlxError::QueryError {
-                    table: query.to_string(),
-                    source: e,
-                })?;
-        }
-
-        // At the end of migration, insert the current version
-        // After all tables are created but before tx.commit()
-        sqlx::query(
-            r#"INSERT INTO "bdk_wallet"."version" (version) 
-               VALUES ($1) 
-               ON CONFLICT (version) DO NOTHING"#,
-        )
-        .bind(1) // Current schema version
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| BdkSqlxError::QueryError {
-            table: "insert version".to_string(),
-            source: e,
-        })?;
-
-        tx.commit().await?;
-
-        Ok(())
-    }
-}
 
 impl Store<Postgres> {
     #[tracing::instrument(skip_all)]
