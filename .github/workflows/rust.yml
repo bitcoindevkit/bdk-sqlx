@@ -15,8 +15,8 @@ env:
   DATABASE_TEST_URL: postgres://postgres:password@localhost:5432/testdb
 
 jobs:
-  wallet-is-persisted:
-    name: Test wallet persistence
+  all-tests:
+    name: Run all wallet tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -32,171 +32,60 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Create database
-        run: |
-          sudo apt-get install libpq-dev -y
-          # Install sqlx-cli
-          cargo install sqlx-cli --no-default-features --features native-tls,postgres
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
-      - name: Test wallet_is_persisted
-        run: cargo test wallet_is_persisted -- --show-output
-
-  test-three-wallets:
-    name: Test three wallets list transactions
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:14
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Create database
-        run: |
-          sudo apt-get install libpq-dev -y
-            # Install sqlx-cli
-          cargo install sqlx-cli --no-default-features --features native-tls,postgres
-          
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
-      - name: Test test_three_wallets_list_transactions
-        run: cargo test test_three_wallets_list_transactions -- --show-output
-
-  wallet-load-checks:
-    name: Test wallet load checks
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:14
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Create database
-        run: |
-          sudo apt-get install libpq-dev -y
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
-      - name: Test wallet_load_checks
-        run: cargo test wallet_load_checks -- --show-output
-
-  single-descriptor-wallet:
-    name: Test single descriptor wallet
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:14
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Create database
-        run: |
-          sudo apt-get install libpq-dev -y
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
-      - name: Test single_descriptor_wallet_persist_and_recover
-        run: cargo test single_descriptor_wallet_persist_and_recover -- --show-output
-
-  two-wallets-load:
-    name: Test two wallets load
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:14
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Create database
-        run: |
-          sudo apt-get install libpq-dev -y
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
-          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
-      - name: Test two_wallets_load
-        run: cargo test two_wallets_load -- --show-output
-
-  fmt-clippy:
-    name: Check
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Check fmt
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -Dwarnings
 
-  security-audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo-audit
+      - name: Install dependencies
+        run: |
+          sudo apt-get install libpq-dev -y
+          # Install sqlx-cli
+          cargo install sqlx-cli --no-default-features --features native-tls,postgres
+          cargo install cargo-audit
+          cargo install cargo-machete
+
+      - name: Create and prepare database
+        run: |
+          psql -h localhost -p 5432 -U postgres -d postgres -c 'create user testuser'
+          psql -h localhost -p 5432 -U postgres -d postgres -c 'create database testdb with owner = testuser'
+
+      - name: Run all wallet tests
+        run: |
+          # Test 1: wallet_is_persisted
+          sqlx migrate run --source migrations/postgres
+          cargo test wallet_is_persisted -- --show-output
+          sqlx migrate revert --all
+          
+          # Test 2: test_three_wallets_list_transactions
+          sqlx migrate run --source migrations/postgres
+          cargo test test_three_wallets_list_transactions -- --show-output
+          sqlx migrate revert --all
+          
+          # Test 3: wallet_load_checks
+          sqlx migrate run --source migrations/postgres
+          cargo test wallet_load_checks -- --show-output
+          sqlx migrate revert --all
+          
+          # Test 4: single_descriptor_wallet_persist_and_recover
+          sqlx migrate run --source migrations/postgres
+          cargo test single_descriptor_wallet_persist_and_recover -- --show-output
+          sqlx migrate revert --all
+          
+          # Test 5: two_wallets_load
+          sqlx migrate run --source migrations/postgres
+          cargo test two_wallets_load -- --show-output
+          sqlx migrate revert --all
+
+      - name: Check fmt and run clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -Dwarnings
+
+      - name: Security Audit
         run: cargo audit
 
-  unused-dependencies:
-    name: Check Unused Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-machete
-        run: cargo install cargo-machete
-      - name: Run cargo-machete
+      - name: Check Unused Dependencies
         run: cargo machete
