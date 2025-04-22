@@ -189,7 +189,7 @@ async fn insert_descriptor(
     };
 
     sqlx::query(
-        r#"INSERT INTO "bdk_wallet"."keychain" (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO "bdk_wallet"."keychain" (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING"#,
     )
         .bind(wallet_name)
         .bind(keychain)
@@ -213,7 +213,7 @@ async fn insert_network(
     network: Network,
 ) -> crate::Result<()> {
     trace!("insert network");
-    sqlx::query(r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2)"#)
+    sqlx::query(r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2) ON CONFLICT DO NOTHING"#)
         .bind(wallet_name)
         .bind(network.to_string())
         .execute(&mut **db_tx)
