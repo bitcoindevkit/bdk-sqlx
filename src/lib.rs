@@ -5,6 +5,7 @@
 mod postgres;
 mod sqlite;
 
+/// Builder for Store
 pub mod pg_store_builder;
 #[cfg(test)]
 mod test;
@@ -13,13 +14,14 @@ use bdk_wallet::bitcoin;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::chain::miniscript;
 pub use sqlx;
+use sqlx::Database;
 use sqlx::Pool;
-use sqlx::{Database, PgPool};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
 use tracing::warn;
 
+/// Result type for bdk-sqlx
 pub type Result<T> = core::result::Result<T, BdkSqlxError>;
 
 /// Thread-safe storage for the network configuration that's shared across all Store instances.

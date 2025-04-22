@@ -20,3 +20,6 @@ example:
 # Database migration
 run-migrations:
     sqlx migrate run --source migrations/postgres
+
+undo-migrations:
+    sqlx migrate revert --all

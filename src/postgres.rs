@@ -3,10 +3,7 @@
 #![warn(missing_docs)]
 
 // Standard library imports
-use std::{
-    str::FromStr,
-    sync::{Arc, OnceLock},
-};
+use std::{str::FromStr, sync::Arc};
 // Third party crates
 use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
@@ -25,7 +22,7 @@ use bdk_wallet::{
 };
 use serde_json::json;
 use sqlx::{
-    postgres::{PgPool, PgRow, Postgres},
+    postgres::{PgRow, Postgres},
     FromRow, Pool, Row, Transaction,
 };
 use tracing::{info, trace, warn};

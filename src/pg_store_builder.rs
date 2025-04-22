@@ -95,16 +95,18 @@ impl PgStoreBuilder {
     /// - Database connection fails
     /// - Network initialization fails
     pub async fn build(self) -> crate::Result<Store<Postgres>> {
-        // Gets network or sets it to regtest by default
-        let network = self.network.unwrap_or(Network::Regtest);
-
-        // Initialize global network
-        initialize_network(network)?;
+        if self
+            .network
+            .and_then(|n| initialize_network(n).ok())
+            .is_none()
+        {
+            return Err(BdkSqlxError::MissingNetwork);
+        }
 
         // Get or create the connection pool
         let pool = match (self.pool, self.url) {
             (Some(pool), _) => pool,
-            (None, Some(url)) => PgPool::connect(&url).await?,
+            (_, Some(url)) => PgPool::connect(&url).await?,
             (None, None) => return Err(BdkSqlxError::MissingPool),
         };
 
@@ -113,6 +115,4 @@ impl PgStoreBuilder {
             wallet_name: self.wallet_name,
         })
     }
-
-    // Removed redundant build_with_url method
 }
