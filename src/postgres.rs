@@ -64,7 +64,7 @@ impl Store<Postgres> {
         let sql = r#"SELECT n.name as network,
         k_int.descriptor as internal_descriptor, k_int.last_revealed as internal_last_revealed,
         k_ext.descriptor as external_descriptor, k_ext.last_revealed as external_last_revealed
-        FROM "bdk_wallet"."network"
+        FROM "bdk_wallet"."network" n
         LEFT JOIN "bdk_wallet"."keychain" k_int ON n.wallet_name = k_int.wallet_name AND k_int.keychainkind = 'Internal'
         LEFT JOIN "bdk_wallet"."keychain" k_ext ON n.wallet_name = k_ext.wallet_name AND k_ext.keychainkind = 'External'
         WHERE n.wallet_name = $1"#;
