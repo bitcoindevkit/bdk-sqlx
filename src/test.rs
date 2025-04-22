@@ -21,7 +21,7 @@ use bitcoin::{
     Network::{self, Regtest},
     OutPoint, Transaction, TxIn, TxOut, Txid,
 };
-use sqlx::{Pool, Postgres, Sqlite, SqlitePool};
+use sqlx::{sqlx_macros::migrate, Pool, Postgres, Sqlite, SqlitePool};
 use test_utils::{
     get_test_tr_single_sig_xprv_and_change_desc, get_test_wpkh, insert_anchor, insert_checkpoint,
     insert_tx, new_tx,
@@ -117,8 +117,14 @@ impl AsyncWalletPersister for TestStore {
     {
         info!("initialize test store");
         match store {
-            TestStore::Postgres(store) => Box::pin(store.read()),
-            TestStore::Sqlite(store) => Box::pin(store.read()),
+            TestStore::Postgres(store) => {
+                migrate!("migrations/postgres");
+                Box::pin(store.read())
+            }
+            TestStore::Sqlite(store) => {
+                migrate!("migrations/sqlite");
+                Box::pin(store.read())
+            }
         }
     }
 
@@ -136,32 +142,6 @@ impl AsyncWalletPersister for TestStore {
             TestStore::Sqlite(store) => Box::pin(store.write(changeset)),
         }
     }
-}
-
-pub async fn drop_tables() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
-    let pool = Pool::<Postgres>::connect(&url.clone()).await?;
-
-    let mut tx = pool.begin().await?;
-
-    // Truncate tables in reverse order of creation to handle foreign key constraints
-    let queries = [
-        r#"TRUNCATE TABLE "bdk_wallet"."anchor_tx" CASCADE"#,
-        r#"TRUNCATE TABLE "bdk_wallet"."txout" CASCADE"#,
-        r#"TRUNCATE TABLE "bdk_wallet"."tx" CASCADE"#,
-        r#"TRUNCATE TABLE "bdk_wallet"."block" CASCADE"#,
-        r#"TRUNCATE TABLE "bdk_wallet"."keychain" CASCADE"#,
-        r#"TRUNCATE TABLE "bdk_wallet"."network" CASCADE"#,
-    ];
-
-    // Execute each query separately
-    for query in &queries {
-        sqlx::query(query).execute(&mut *tx).await?;
-    }
-
-    tx.commit().await?;
-
-    Ok(())
 }
 
 async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore>> {
@@ -339,8 +319,6 @@ async fn wallet_is_persisted() -> anyhow::Result<()> {
         }
     }
 
-    drop_tables().await?;
-
     Ok(())
 }
 
@@ -438,8 +416,6 @@ async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
         assert_eq!(saved_balance, loaded_balance);
     }
 
-    drop_tables().await?;
-
     Ok(())
 }
 
@@ -503,8 +479,6 @@ async fn wallet_load_checks() -> anyhow::Result<()> {
         }
     }
 
-    drop_tables().await?;
-
     Ok(())
 }
 
@@ -551,8 +525,6 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
             );
         }
     }
-
-    drop_tables().await?;
 
     Ok(())
 }
@@ -639,8 +611,6 @@ async fn two_wallets_load() -> anyhow::Result<()> {
             "different wallets should not have same chain tip"
         );
     }
-
-    drop_tables().await?;
 
     Ok(())
 }
