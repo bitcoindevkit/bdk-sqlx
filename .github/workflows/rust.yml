@@ -44,8 +44,6 @@ jobs:
           sudo apt-get install libpq-dev -y
           # Install sqlx-cli
           cargo install sqlx-cli --no-default-features --features native-tls,postgres
-          cargo install cargo-audit
-          cargo install cargo-machete
 
       - name: Create and prepare database
         run: |
@@ -85,7 +83,11 @@ jobs:
           cargo clippy --all-targets -- -Dwarnings
 
       - name: Security Audit
-        run: cargo audit
+        run: |
+          cargo install cargo-audit
+          cargo audit
 
       - name: Check Unused Dependencies
-        run: cargo machete
+        run: |
+          cargo install cargo-machete
+          cargo machete
