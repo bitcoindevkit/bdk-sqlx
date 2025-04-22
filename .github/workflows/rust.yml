@@ -13,7 +13,7 @@ env:
   CARGO_TERM_COLOR: auto
   PGPASSWORD: password
   DATABASE_TEST_URL: postgres://postgres:password@localhost:5432/testdb
-
+  DATABASE_URL: postgres://postgres:password@localhost:5432/testdb
 jobs:
   all-tests:
     name: Run all wallet tests
