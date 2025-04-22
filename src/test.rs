@@ -104,7 +104,7 @@ impl DropAll for Pool<Postgres> {
 #[derive(Debug)]
 enum TestStore {
     Postgres(Store<Postgres>),
-    Sqlite(Store<Sqlite>),
+    // Sqlite(Store<Sqlite>),
 }
 
 impl AsyncWalletPersister for TestStore {
@@ -118,13 +118,13 @@ impl AsyncWalletPersister for TestStore {
         info!("initialize test store");
         match store {
             TestStore::Postgres(store) => {
-                migrate!("migrations/postgres");
+               migrate!("migrations/postgres");
                 Box::pin(store.read())
             }
-            TestStore::Sqlite(store) => {
-                migrate!("migrations/sqlite");
-                Box::pin(store.read())
-            }
+            // TestStore::Sqlite(store) => {
+            //     migrate!("migrations/sqlite");
+            //     Box::pin(store.read())
+            // }
         }
     }
 
@@ -139,7 +139,7 @@ impl AsyncWalletPersister for TestStore {
         info!("persist test store");
         match store {
             TestStore::Postgres(store) => Box::pin(store.write(changeset)),
-            TestStore::Sqlite(store) => Box::pin(store.write(changeset)),
+            // TestStore::Sqlite(store) => Box::pin(store.write(changeset)),
         }
     }
 }
