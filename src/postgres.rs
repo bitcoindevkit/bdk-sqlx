@@ -250,6 +250,8 @@ impl Store<Postgres> {
             txid TEXT NOT NULL,
             whole_tx BYTEA,
             last_seen BIGINT,
+            last_evicted BIGINT,
+            first_seen BIGINT,
             PRIMARY KEY (wallet_name, txid)
         )"#,
             r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."txout" (
@@ -283,14 +285,42 @@ impl Store<Postgres> {
                 })?;
         }
 
-        // At the end of migration, insert the current version
-        // After all tables are created but before tx.commit()
+        // Check current schema version and apply migrations if needed
+        let current_version: Option<i32> = sqlx::query_scalar(
+            r#"SELECT version FROM "bdk_wallet"."version" ORDER BY version DESC LIMIT 1"#,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "select version".to_string(),
+            source: e,
+        })?;
+
+        match current_version {
+            Some(1) => {
+                // Migrate from v1 to v2: Add last_evicted and first_seen columns
+                sqlx::query(
+                    r#"ALTER TABLE "bdk_wallet"."tx" 
+                       ADD COLUMN IF NOT EXISTS last_evicted BIGINT,
+                       ADD COLUMN IF NOT EXISTS first_seen BIGINT"#,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "alter tx table".to_string(),
+                    source: e,
+                })?;
+            }
+            _ => {} // Fresh install or already at v2
+        }
+
+        // Insert or update to current version
         sqlx::query(
             r#"INSERT INTO "bdk_wallet"."version" (version) 
                VALUES ($1) 
                ON CONFLICT (version) DO NOTHING"#,
         )
-        .bind(1) // Current schema version
+        .bind(2) // Current schema version is now 2
         .execute(&mut *tx)
         .await
         .map_err(|e| BdkSqlxError::QueryError {
@@ -512,7 +542,7 @@ pub async fn tx_graph_changeset_from_postgres(
 
     // Fetch transactions
     let rows = sqlx::query(
-        r#"SELECT txid, whole_tx, last_seen FROM "bdk_wallet"."tx" WHERE wallet_name = $1"#,
+        r#"SELECT txid, whole_tx, last_seen, last_evicted, first_seen FROM "bdk_wallet"."tx" WHERE wallet_name = $1"#,
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
@@ -527,6 +557,8 @@ pub async fn tx_graph_changeset_from_postgres(
         let txid = Txid::from_str(&txid)?;
         let whole_tx: Option<Vec<u8>> = row.get("whole_tx");
         let last_seen: Option<i64> = row.get("last_seen");
+        let _last_evicted: Option<i64> = row.get("last_evicted");
+        let _first_seen: Option<i64> = row.get("first_seen");
 
         if let Some(tx_bytes) = whole_tx {
             if let Ok(tx) = bitcoin::Transaction::consensus_decode(&mut tx_bytes.as_slice()) {
@@ -536,6 +568,8 @@ pub async fn tx_graph_changeset_from_postgres(
         if let Some(last_seen) = last_seen {
             changeset.last_seen.insert(txid, last_seen as u64);
         }
+        // Note: last_evicted and first_seen are fetched but not yet used in ChangeSet
+        // These fields are stored for future use when bdk_chain supports them
     }
 
     // Fetch txouts
@@ -602,6 +636,8 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 ) -> Result<()> {
     trace!("tx graph changeset from postgres");
     for tx in &changeset.txs {
+        // Note: last_evicted and first_seen columns are reserved for future use
+        // when bdk_chain adds support for these fields in ChangeSet
         sqlx::query(
             r#"INSERT INTO "bdk_wallet"."tx" (wallet_name, txid, whole_tx) VALUES ($1, $2, $3)
              ON CONFLICT (wallet_name, txid) DO UPDATE SET whole_tx = $3"#,

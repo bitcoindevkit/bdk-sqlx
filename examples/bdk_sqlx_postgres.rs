@@ -1,14 +1,15 @@
 #![allow(unused)]
-use std::collections::HashSet;
-use std::io::Write;
-
+use anyhow::Context;
 use bdk_electrum::{electrum_client, BdkElectrumClient};
 use bdk_sqlx::sqlx::Postgres;
 use bdk_sqlx::{PgStoreBuilder, Store};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::bitcoin::Network;
-use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
+use bdk_wallet::chain::spk_client::{FullScanRequest, SyncRequest};
+use bdk_wallet::{KeychainKind, PersistedWallet, Update, Wallet};
 use rustls::crypto::ring::default_provider;
+use std::collections::HashSet;
+use std::io::Write;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -119,7 +120,6 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
 fn electrum(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()> {
     let client = BdkElectrumClient::new(electrum_client::Client::new(ELECTRUM_URL)?);
 
@@ -127,23 +127,38 @@ fn electrum(wallet: &mut PersistedWallet<Store<Postgres>>) -> anyhow::Result<()>
     // already have.
     client.populate_tx_cache(wallet.tx_graph().full_txs().map(|tx_node| tx_node.tx));
 
-    let request = wallet.start_full_scan().inspect({
-        let mut stdout = std::io::stdout();
-        let mut once = HashSet::<KeychainKind>::new();
-        move |k, spk_i, _| {
-            if once.insert(k) {
-                print!("\nScanning keychain [{:?}]", k);
-            }
-            print!(" {:<3}", spk_i);
-            stdout.flush().expect("must flush");
-        }
-    });
+    
+    let graph = wallet.tx_graph();
+    let chain = wallet.local_chain();
+    let request = {
+        FullScanRequest::builder()
+            .chain_tip(chain.tip())
+            .spks_for_keychain(
+                KeychainKind::External,
+                graph
+                    .index
+                    .unbounded_spk_iter(KeychainKind::External)
+                    .into_iter()
+                    .flatten(),
+            )
+            .spks_for_keychain(
+                KeychainKind::Internal,
+                graph
+                    .index
+                    .unbounded_spk_iter(KeychainKind::Internal)
+                    .into_iter()
+                    .flatten(),
+            )
+    };
 
-    let update = client.full_scan(request, STOP_GAP, BATCH_SIZE, true)?;
-
-    println!();
-
-    wallet.apply_update(update)?;
+    let res = client
+        .full_scan::<_>(request, STOP_GAP, BATCH_SIZE, false)
+        .context("scanning the blockchain")?;
+    (
+        res.chain_update,
+        res.tx_update,
+        Some(res.last_active_indices),
+    );
 
     Ok(())
 }

@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS bdk_wallet.tx (
     txid TEXT NOT NULL,
     whole_tx BYTEA,
     last_seen BIGINT,
+    last_evicted BIGINT,
+    first_seen BIGINT,
     PRIMARY KEY (wallet_name, txid)
 );
 
