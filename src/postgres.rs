@@ -624,7 +624,10 @@ async fn load_keychain_spks(
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
     trace!("load keychain spks - starting");
-    println!("load_keychain_spks: Starting for wallet '{}', descriptor_id: {:?}", wallet_name, descriptor_id);
+    println!(
+        "load_keychain_spks: Starting for wallet '{}', descriptor_id: {:?}",
+        wallet_name, descriptor_id
+    );
 
     let query_start = std::time::Instant::now();
     let rows = sqlx::query(
@@ -641,7 +644,11 @@ async fn load_keychain_spks(
         source: e,
     })?;
     let query_duration = query_start.elapsed();
-    println!("load_keychain_spks: Query completed in {:?}, fetched {} rows", query_duration, rows.len());
+    println!(
+        "load_keychain_spks: Query completed in {:?}, fetched {} rows",
+        query_duration,
+        rows.len()
+    );
 
     if !rows.is_empty() {
         let processing_start = std::time::Instant::now();
@@ -653,11 +660,17 @@ async fn load_keychain_spks(
         }
         changeset.indexer.spk_cache.insert(descriptor_id, spks);
         let processing_duration = processing_start.elapsed();
-        println!("load_keychain_spks: Processing rows completed in {:?}", processing_duration);
+        println!(
+            "load_keychain_spks: Processing rows completed in {:?}",
+            processing_duration
+        );
     }
 
     let total_duration = start_time.elapsed();
-    println!("load_keychain_spks: Total function execution time: {:?}", total_duration);
+    println!(
+        "load_keychain_spks: Total function execution time: {:?}",
+        total_duration
+    );
     trace!("load keychain spks - completed in {:?}", total_duration);
 
     Ok(())
