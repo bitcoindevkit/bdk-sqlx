@@ -622,8 +622,11 @@ async fn load_keychain_spks(
     descriptor_id: DescriptorId,
     changeset: &mut ChangeSet,
 ) -> Result<()> {
-    trace!("load keychain spks");
+    let start_time = std::time::Instant::now();
+    trace!("load keychain spks - starting");
+    println!("load_keychain_spks: Starting for wallet '{}', descriptor_id: {:?}", wallet_name, descriptor_id);
 
+    let query_start = std::time::Instant::now();
     let rows = sqlx::query(
         r#"SELECT idx, script FROM "bdk_wallet"."keychain_spk" 
            WHERE wallet_name = $1 AND descriptor_id = $2 
@@ -637,8 +640,11 @@ async fn load_keychain_spks(
         table: "select keychain_spk".to_string(),
         source: e,
     })?;
+    let query_duration = query_start.elapsed();
+    println!("load_keychain_spks: Query completed in {:?}, fetched {} rows", query_duration, rows.len());
 
     if !rows.is_empty() {
+        let processing_start = std::time::Instant::now();
         let mut spks = BTreeMap::new();
         for row in rows {
             let idx: i32 = row.get("idx");
@@ -646,7 +652,13 @@ async fn load_keychain_spks(
             spks.insert(idx as u32, ScriptBuf::from_bytes(script));
         }
         changeset.indexer.spk_cache.insert(descriptor_id, spks);
+        let processing_duration = processing_start.elapsed();
+        println!("load_keychain_spks: Processing rows completed in {:?}", processing_duration);
     }
+
+    let total_duration = start_time.elapsed();
+    println!("load_keychain_spks: Total function execution time: {:?}", total_duration);
+    trace!("load keychain spks - completed in {:?}", total_duration);
 
     Ok(())
 }

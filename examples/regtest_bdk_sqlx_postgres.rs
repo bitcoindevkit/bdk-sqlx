@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(
             |_| {
                 "sqlx=warn,\
-                    bdk_sqlx=debug"
+                    bdk_sqlx=debug,trace"
                     .into()
             },
         )))

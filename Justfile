@@ -119,4 +119,4 @@ run-example-regtest:
     # Generate initial blocks
     just generate-blocks
     # Run the regtest example
-    cargo run --example regtest_bdk_sqlx_postgres
+    cargo run -r --example regtest_bdk_sqlx_postgres
