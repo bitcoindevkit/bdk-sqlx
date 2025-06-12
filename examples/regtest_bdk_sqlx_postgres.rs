@@ -1,5 +1,5 @@
 #![allow(unused)]
-use anyhow::Context;
+use anyhow::{bail, Context};
 use bdk_electrum::electrum_client::ElectrumApi;
 use bdk_electrum::{electrum_client, BdkElectrumClient};
 use bdk_sqlx::sqlx::Postgres;
@@ -162,9 +162,7 @@ async fn main() -> anyhow::Result<()> {
                             .await
                             {
                                 Ok(_) => {
-                                    println!(
-                                        "ERROR: Double-spend succeeded! This should not happen."
-                                    );
+                                    println!("Double-spend succeeded!");
                                 }
                                 Err(e) => {
                                     println!("✓ Double-spend correctly failed: {}", e);
@@ -172,16 +170,16 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         Err(e) => {
-                            println!("Failed to create second transaction: {}", e);
+                            bail!("Failed to create second transaction: {}", e);
                         }
                     }
                 }
             }
-            Err(e) => println!("Failed to create transaction: {}", e),
+            Err(e) => bail!("Failed to create transaction: {}", e),
         }
     } else {
         println!("\nInsufficient balance to create a transaction. Need at least 10,000 sats.");
-        println!("Current balance: {} sats", balance.total().to_sat());
+        bail!("Current balance: {} sats", balance.total().to_sat());
     }
 
     // Load wallet 2
@@ -229,9 +227,7 @@ fn electrum(
 ) -> anyhow::Result<()> {
     let client = BdkElectrumClient::new(electrum_client::Client::new(electrum_url)?);
     let request = wallet.start_full_scan().build();
-    let res = client
-        .full_scan::<_>(request, STOP_GAP, BATCH_SIZE, true)
-        .context("scanning the blockchain")?;
+    let res = client.full_scan::<_>(request, STOP_GAP, BATCH_SIZE, true)?;
     wallet.apply_update(res)?;
     Ok(())
 }
@@ -335,7 +331,7 @@ async fn create_rbf_transaction(
     let txid = tx.clone().compute_txid();
 
     if !finalized {
-        return Err(anyhow::anyhow!("Failed to finalize transaction"));
+        bail!("Failed to finalize transaction");
     }
 
     // Extract the signed transaction
@@ -357,7 +353,7 @@ async fn create_rbf_transaction(
         }
         Err(e) => {
             println!("Failed to broadcast: {}", e);
-            Err(anyhow::anyhow!("Broadcast failed: {}", e))
+            bail!("Broadcast failed: {}", e)
         }
     }
 }
@@ -380,7 +376,7 @@ async fn verify_transaction_persisted(
     let wallet = match Wallet::load().load_wallet_async(&mut store).await? {
         Some(wallet) => wallet,
         None => {
-            return Err(anyhow::anyhow!("Failed to load wallet from persistence"));
+            bail!("Failed to load wallet from persistence");
         }
     };
 
@@ -401,7 +397,7 @@ async fn verify_transaction_persisted(
         }
     } else {
         println!("\n✗ Transaction NOT found in persisted wallet!");
-        return Err(anyhow::anyhow!("Transaction not found after persistence"));
+        bail!("Transaction not found after persistence");
     }
 
     Ok(())
@@ -506,7 +502,7 @@ async fn create_coincontrol_transaction(
     let finalized = wallet.sign(&mut psbt, SignOptions::default())?;
 
     if !finalized {
-        return Err(anyhow::anyhow!("Failed to finalize transaction"));
+        bail!("Failed to finalize transaction");
     }
 
     let tx = psbt.extract_tx().expect("valid tx");
@@ -528,7 +524,7 @@ async fn create_coincontrol_transaction(
         }
         Err(e) => {
             println!("Broadcast failed (expected for double-spend): {}", e);
-            Err(anyhow::anyhow!("Broadcast failed: {}", e))
+            bail!("Broadcast failed: {}", e)
         }
     }
 }
@@ -566,9 +562,7 @@ async fn create_double_spend_transaction(
 
             let finalized = wallet.sign(&mut psbt, SignOptions::default())?;
             if !finalized {
-                return Err(anyhow::anyhow!(
-                    "Failed to finalize double-spend transaction"
-                ));
+                bail!("Failed to finalize double-spend transaction");
             }
 
             let tx = psbt.extract_tx().expect("valid tx");
@@ -581,15 +575,12 @@ async fn create_double_spend_transaction(
 
             match client.transaction_broadcast_raw(&tx_raw) {
                 Ok(_) => Ok(txid),
-                Err(e) => Err(anyhow::anyhow!("Broadcast failed: {}", e)),
+                Err(e) => bail!("Broadcast failed: {}", e),
             }
         }
         Err(e) => {
             // This is the expected path
-            Err(anyhow::anyhow!(
-                "Transaction building failed (expected): {}",
-                e
-            ))
+            bail!("Transaction building failed (expected): {}", e)
         }
     }
 }
@@ -660,10 +651,14 @@ async fn test_spk_cache_performance(url: &str) -> anyhow::Result<()> {
 
     // Measure loading time
     let load_start = Instant::now();
-    let loaded_wallet = match Wallet::load().load_wallet_async(&mut store).await? {
+    let loaded_wallet = match Wallet::load()
+        .use_spk_cache(true)
+        .load_wallet_async(&mut store)
+        .await?
+    {
         Some(wallet) => wallet,
         None => {
-            return Err(anyhow::anyhow!("Failed to load wallet from persistence"));
+            bail!("Failed to load wallet from persistence");
         }
     };
     let load_time = load_start.elapsed();
