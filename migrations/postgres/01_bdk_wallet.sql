@@ -22,7 +22,19 @@ CREATE TABLE IF NOT EXISTS bdk_wallet.keychain (
     descriptor TEXT NOT NULL,
     descriptor_id BYTEA NOT NULL,
     last_revealed INTEGER DEFAULT 0,
-    PRIMARY KEY (wallet_name, keychainkind)
+    PRIMARY KEY (wallet_name, keychainkind),
+    UNIQUE (wallet_name, descriptor_id)
+);
+
+-- Script pubkey cache for keychains
+-- Stores precomputed script pubkeys for each keychain index
+CREATE TABLE IF NOT EXISTS bdk_wallet.keychain_spk (
+    wallet_name TEXT NOT NULL,
+    descriptor_id BYTEA NOT NULL,
+    idx INTEGER NOT NULL,
+    script BYTEA NOT NULL,
+    PRIMARY KEY (wallet_name, descriptor_id, idx),
+    FOREIGN KEY (wallet_name, descriptor_id) REFERENCES bdk_wallet.keychain(wallet_name, descriptor_id)
 );
 
 -- Hash is block hash hex string,

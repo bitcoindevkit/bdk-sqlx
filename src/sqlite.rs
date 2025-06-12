@@ -471,7 +471,7 @@ pub async fn local_chain_changeset_persist_to_sqlite(
 
 /// Collects information on all the wallets in the database and dumps it to stdout.
 #[tracing::instrument]
-pub async fn easy_backup(db: Pool<Sqlite>) -> Result<(), BdkSqlxError> {
+pub async fn _easy_backup(db: Pool<Sqlite>) -> Result<(), BdkSqlxError> {
     info!("Starting easy backup");
 
     let statement = "SELECT * FROM keychain";

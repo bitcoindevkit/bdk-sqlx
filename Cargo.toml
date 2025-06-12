@@ -13,6 +13,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde_json", "json"] }
 
 [dependencies.bdk_wallet]
+version = "2.0.0"
 git = "https://github.com/bitcoindevkit/bdk_wallet.git"
 tag = "wallet-2.0.0"
 features = ["test-utils"]
@@ -23,8 +24,7 @@ anyhow = "1.0.89"
 rustls = "0.23.14"
 
 [dev-dependencies.bdk_electrum]
-git = "https://github.com/bitcoindevkit/bdk.git"
-tag = "chain-0.23.0"
+version = "0.23.0"
 
 [[example]]
 name = "bdk_sqlx_postgres"

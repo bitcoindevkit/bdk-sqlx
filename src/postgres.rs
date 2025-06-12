@@ -4,6 +4,7 @@
 
 // Standard library imports
 use std::{
+    collections::BTreeMap,
     str::FromStr,
     sync::{Arc, OnceLock},
 };
@@ -236,7 +237,8 @@ impl Store<Postgres> {
             descriptor TEXT NOT NULL,
             descriptor_id BYTEA NOT NULL,
             last_revealed INTEGER DEFAULT 0,
-            PRIMARY KEY (wallet_name, keychainkind)
+            PRIMARY KEY (wallet_name, keychainkind),
+            UNIQUE (wallet_name, descriptor_id)
         )"#,
             r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."block" (
             wallet_name TEXT NOT NULL,
@@ -272,6 +274,14 @@ impl Store<Postgres> {
             FOREIGN KEY (wallet_name, txid) REFERENCES "bdk_wallet"."tx"(wallet_name, txid)
         )"#,
             r#"CREATE INDEX IF NOT EXISTS idx_anchor_tx_txid ON "bdk_wallet"."anchor_tx" (txid)"#,
+            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."keychain_spk" (
+            wallet_name TEXT NOT NULL,
+            descriptor_id BYTEA NOT NULL,
+            idx INTEGER NOT NULL,
+            script BYTEA NOT NULL,
+            PRIMARY KEY (wallet_name, descriptor_id, idx),
+            FOREIGN KEY (wallet_name, descriptor_id) REFERENCES "bdk_wallet"."keychain"(wallet_name, descriptor_id)
+        )"#,
         ];
 
         // Execute each query separately
@@ -310,8 +320,69 @@ impl Store<Postgres> {
                     table: "alter tx table".to_string(),
                     source: e,
                 })?;
+
+                // Also add unique constraint and keychain_spk table for v2
+                sqlx::query(
+                    r#"ALTER TABLE "bdk_wallet"."keychain" 
+                       ADD CONSTRAINT keychain_wallet_descriptor_unique 
+                       UNIQUE (wallet_name, descriptor_id)"#,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "add unique constraint to keychain".to_string(),
+                    source: e,
+                })?;
+
+                sqlx::query(
+                    r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."keychain_spk" (
+                        wallet_name TEXT NOT NULL,
+                        descriptor_id BYTEA NOT NULL,
+                        idx INTEGER NOT NULL,
+                        script BYTEA NOT NULL,
+                        PRIMARY KEY (wallet_name, descriptor_id, idx),
+                        FOREIGN KEY (wallet_name, descriptor_id) REFERENCES "bdk_wallet"."keychain"(wallet_name, descriptor_id)
+                    )"#,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "create keychain_spk table".to_string(),
+                    source: e,
+                })?;
             }
-            _ => {} // Fresh install or already at v2
+            Some(2) => {
+                // Migrate from v2 to v3: Add unique constraint and keychain_spk table
+                sqlx::query(
+                    r#"ALTER TABLE "bdk_wallet"."keychain" 
+                       ADD CONSTRAINT IF NOT EXISTS keychain_wallet_descriptor_unique 
+                       UNIQUE (wallet_name, descriptor_id)"#,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "add unique constraint to keychain".to_string(),
+                    source: e,
+                })?;
+
+                sqlx::query(
+                    r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."keychain_spk" (
+                        wallet_name TEXT NOT NULL,
+                        descriptor_id BYTEA NOT NULL,
+                        idx INTEGER NOT NULL,
+                        script BYTEA NOT NULL,
+                        PRIMARY KEY (wallet_name, descriptor_id, idx),
+                        FOREIGN KEY (wallet_name, descriptor_id) REFERENCES "bdk_wallet"."keychain"(wallet_name, descriptor_id)
+                    )"#,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "create keychain_spk table".to_string(),
+                    source: e,
+                })?;
+            }
+            _ => {} // Fresh install or already at v3
         }
 
         // Insert or update to current version
@@ -320,7 +391,7 @@ impl Store<Postgres> {
                VALUES ($1) 
                ON CONFLICT (version) DO NOTHING"#,
         )
-        .bind(2) // Current schema version is now 2
+        .bind(3) // Current schema version is now 3
         .execute(&mut *tx)
         .await
         .map_err(|e| BdkSqlxError::QueryError {
@@ -395,6 +466,8 @@ impl Store<Postgres> {
             if let Some(last_rev) = external_last_revealed {
                 changeset.indexer.last_revealed.insert(did, last_rev as u32);
             }
+            // Load SPK cache for external descriptor
+            load_keychain_spks(db_tx, wallet_name, did, changeset).await?;
         }
 
         if let Some(desc_str) = internal_desc_str {
@@ -404,6 +477,8 @@ impl Store<Postgres> {
             if let Some(last_rev) = internal_last_revealed {
                 changeset.indexer.last_revealed.insert(did, last_rev as u32);
             }
+            // Load SPK cache for internal descriptor
+            load_keychain_spks(db_tx, wallet_name, did, changeset).await?;
         }
 
         changeset.tx_graph = tx_graph_changeset_from_postgres(db_tx, wallet_name).await?;
@@ -437,6 +512,14 @@ impl Store<Postgres> {
         if !last_revealed_indices.is_empty() {
             for (desc_id, index) in last_revealed_indices {
                 update_last_revealed(&mut tx, wallet_name, *desc_id, *index).await?;
+            }
+        }
+
+        // Persist SPK cache
+        let spk_cache = &changeset.indexer.spk_cache;
+        if !spk_cache.is_empty() {
+            for (desc_id, spks) in spk_cache {
+                persist_keychain_spks(&mut tx, wallet_name, *desc_id, spks).await?;
             }
         }
 
@@ -527,6 +610,74 @@ async fn update_last_revealed(
             table: "update keychain".to_string(),
             source: e,
         })?;
+
+    Ok(())
+}
+
+/// Load keychain script pubkeys from the database
+#[tracing::instrument(skip(db_tx, changeset))]
+async fn load_keychain_spks(
+    db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    descriptor_id: DescriptorId,
+    changeset: &mut ChangeSet,
+) -> Result<()> {
+    trace!("load keychain spks");
+
+    let rows = sqlx::query(
+        r#"SELECT idx, script FROM "bdk_wallet"."keychain_spk" 
+           WHERE wallet_name = $1 AND descriptor_id = $2 
+           ORDER BY idx"#,
+    )
+    .bind(wallet_name)
+    .bind(descriptor_id.to_byte_array())
+    .fetch_all(&mut **db_tx)
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "select keychain_spk".to_string(),
+        source: e,
+    })?;
+
+    if !rows.is_empty() {
+        let mut spks = BTreeMap::new();
+        for row in rows {
+            let idx: i32 = row.get("idx");
+            let script: Vec<u8> = row.get("script");
+            spks.insert(idx as u32, ScriptBuf::from_bytes(script));
+        }
+        changeset.indexer.spk_cache.insert(descriptor_id, spks);
+    }
+
+    Ok(())
+}
+
+/// Persist keychain script pubkeys to the database
+#[tracing::instrument(skip(db_tx, spks))]
+async fn persist_keychain_spks(
+    db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    descriptor_id: DescriptorId,
+    spks: &BTreeMap<u32, ScriptBuf>,
+) -> Result<()> {
+    trace!("persist keychain spks");
+
+    for (idx, spk) in spks {
+        sqlx::query(
+            r#"INSERT INTO "bdk_wallet"."keychain_spk" (wallet_name, descriptor_id, idx, script) 
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (wallet_name, descriptor_id, idx) DO UPDATE SET script = $4"#,
+        )
+        .bind(wallet_name)
+        .bind(descriptor_id.to_byte_array())
+        .bind(*idx as i32)
+        .bind(spk.as_bytes())
+        .execute(&mut **db_tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert keychain_spk".to_string(),
+            source: e,
+        })?;
+    }
 
     Ok(())
 }
@@ -783,7 +934,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
 
 /// Collects information on all the wallets in the database and dumps it to stdout.
 #[tracing::instrument]
-pub async fn easy_backup(db: Pool<Postgres>) -> Result<()> {
+pub async fn _easy_backup(db: Pool<Postgres>) -> Result<()> {
     trace!("Starting easy backup");
 
     let statement = r#"SELECT * FROM "bdk_wallet"."keychain""#;
