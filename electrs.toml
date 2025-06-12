@@ -1,0 +1,19 @@
+auth = "custom_user:custom_pass"
+# The listening RPC address of bitcoind
+daemon_rpc_addr = "bitcoin-node:18443"  # Use the Docker service name
+daemon_p2p_addr = "bitcoin-node:18444"
+# The listening P2P address of bitcoind
+# Note: Your Bitcoin node has P2P listening disabled (-listen=0)
+# so this connection will fail, but electrs needs P2P
+
+# Network type
+network = "regtest"
+
+# Database directory
+db_dir = "/data/electrs"
+
+# Electrum server address
+electrum_rpc_addr = "0.0.0.0:50001"  # Allow external connections
+
+# Log level
+log_filters = "INFO"

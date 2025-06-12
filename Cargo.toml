@@ -29,3 +29,7 @@ version = "0.23.0"
 [[example]]
 name = "bdk_sqlx_postgres"
 path = "examples/bdk_sqlx_postgres.rs"
+
+[[example]]
+name = "regtest_bdk_sqlx_postgres"
+path = "examples/regtest_bdk_sqlx_postgres.rs"
