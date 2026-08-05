@@ -370,13 +370,24 @@ impl Store<Postgres> {
         let internal_desc_str: Option<String> = row.get("internal_descriptor");
         let external_desc_str: Option<String> = row.get("external_descriptor");
 
-        changeset.network =
-            Some(
-                Network::from_str(&network).map_err(|got| BdkSqlxError::InvalidNetwork {
-                    expected: get_network().unwrap().to_string(),
-                    got: got.to_string(),
-                })?,
-            );
+        let stored_network =
+            Network::from_str(&network).map_err(|_| BdkSqlxError::InvalidNetwork {
+                expected: get_network()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|_| "a known network".to_string()),
+                got: network.clone(),
+            })?;
+        // Reject data persisted for a different network than this process was
+        // configured for, instead of silently loading it.
+        if let Ok(configured) = get_network() {
+            if configured != stored_network {
+                return Err(BdkSqlxError::InvalidNetwork {
+                    expected: configured.to_string(),
+                    got: stored_network.to_string(),
+                });
+            }
+        }
+        changeset.network = Some(stored_network);
 
         if let Some(desc_str) = external_desc_str {
             let descriptor: Descriptor<DescriptorPublicKey> = desc_str.parse()?;

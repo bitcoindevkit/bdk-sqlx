@@ -150,6 +150,59 @@ impl AsyncWalletPersister for TestStore {
     }
 }
 
+/// Data stored for a different network than the store was configured with (or an
+/// unparseable network string) must fail the load instead of being silently accepted.
+#[tokio::test]
+async fn mismatched_network_errors_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    let pool = create_test_pg_pool().await?;
+    let mut store = PgStoreBuilder::new(wallet_name.clone())
+        .network(NETWORK)
+        .migrate(true)
+        .pool(pool.clone())
+        .build()
+        .await?;
+    Wallet::create(external_desc, internal_desc)
+        .network(NETWORK)
+        .create_wallet_async(&mut store)
+        .await?;
+
+    let set_network = r#"UPDATE "bdk_wallet"."network" SET name=$2 WHERE wallet_name=$1"#;
+
+    // a parseable but different network than the configured one
+    sqlx::query(set_network)
+        .bind(&wallet_name)
+        .bind("bitcoin")
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::InvalidNetwork { .. }));
+
+    // an unparseable network string
+    sqlx::query(set_network)
+        .bind(&wallet_name)
+        .bind("junknet")
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::InvalidNetwork { .. }));
+
+    sqlx::query(set_network)
+        .bind(&wallet_name)
+        .bind(NETWORK.to_string())
+        .execute(&pool)
+        .await?;
+    store.read().await?;
+    Ok(())
+}
+
 #[derive(Clone)]
 struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

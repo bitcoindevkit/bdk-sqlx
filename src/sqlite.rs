@@ -137,7 +137,13 @@ impl Store<Sqlite> {
         let internal_desc_str: Option<String> = row.get("internal_descriptor");
         let external_desc_str: Option<String> = row.get("external_descriptor");
 
-        changeset.network = Some(Network::from_str(&network).expect("parse Network"));
+        changeset.network =
+            Some(
+                Network::from_str(&network).map_err(|_| BdkSqlxError::InvalidNetwork {
+                    expected: "a known network".to_string(),
+                    got: network.clone(),
+                })?,
+            );
 
         if let Some(desc_str) = external_desc_str {
             let descriptor: Descriptor<DescriptorPublicKey> = desc_str.parse()?;
