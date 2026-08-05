@@ -1,6 +1,7 @@
 use std::env;
 use std::ops::Add;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
 use assert_matches::assert_matches;
@@ -21,7 +22,8 @@ use bitcoin::{
     Network::{self, Regtest},
     OutPoint, Transaction, TxIn, TxOut, Txid,
 };
-use sqlx::{Pool, Postgres, Sqlite, SqlitePool};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{Pool, Postgres, Sqlite};
 use test_utils::{
     get_test_tr_single_sig_xprv_and_change_desc, get_test_wpkh, insert_anchor, insert_checkpoint,
     insert_tx, new_tx,
@@ -59,45 +61,56 @@ fn initialize() {
     });
 }
 
-trait DropAll {
-    async fn drop_all(&self) -> anyhow::Result<()>;
-}
+static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TEST_DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-impl DropAll for Pool<Postgres> {
-    /// Drops all tables.
-    ///
-    /// Clean up (optional, depending on your test database strategy)
-    /// You might want to delete the test wallet from the database here.
-    #[tracing::instrument]
-    async fn drop_all(&self) -> anyhow::Result<()> {
-        let drop_statements = vec![
-            "DROP TABLE IF EXISTS _sqlx_migrations",
-            "DROP TABLE IF EXISTS vault_addresses",
-            "DROP TABLE IF EXISTS used_anchorwatch_keys",
-            "DROP TABLE IF EXISTS anchorwatch_keys",
-            "DROP TABLE IF EXISTS psbts",
-            "DROP TABLE IF EXISTS whitelist_update",
-            "DROP TABLE IF EXISTS vault_parameters",
-            "DROP TABLE IF EXISTS users",
-            "DROP TABLE IF EXISTS version",
-            "DROP TABLE IF EXISTS anchor_tx",
-            "DROP TABLE IF EXISTS txout",
-            "DROP TABLE IF EXISTS tx",
-            "DROP TABLE IF EXISTS block",
-            "DROP TABLE IF EXISTS keychain",
-            "DROP TABLE IF EXISTS network",
-        ];
+/// Creates a uniquely named database on the postgres server at `DATABASE_TEST_URL` and
+/// returns a pool connected to it, so every test gets an isolated database and no
+/// pre-existing tables are ever dropped.
+///
+/// Databases left behind by previous test runs are removed opportunistically; a database
+/// is never dropped while any session is connected to it, and creation/cleanup are
+/// serialized so a parallel test cannot drop a database between its creation and first
+/// connection.
+async fn create_test_pg_pool() -> anyhow::Result<Pool<Postgres>> {
+    let admin_url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
+    let admin_pool = Pool::<Postgres>::connect(&admin_url).await?;
 
-        let mut tx = self.begin().await?;
+    let db_name = format!(
+        "bdk_sqlx_test_{}_{}",
+        std::process::id(),
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
 
-        for statement in drop_statements {
-            sqlx::query(statement).execute(&mut *tx).await?;
-        }
+    let guard = TEST_DB_LOCK.lock().await;
 
-        tx.commit().await?;
-
-        Ok(())
+    let stale: Vec<String> = sqlx::query_scalar(
+        "SELECT datname::text FROM pg_database d
+         WHERE datname LIKE 'bdk_sqlx_test_%'
+           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)",
+    )
+    .fetch_all(&admin_pool)
+    .await?;
+    for stale_db in stale {
+        let _ = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{stale_db}""#))
+            .execute(&admin_pool)
+            .await;
     }
+
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin_pool)
+        .await?;
+
+    // min_connections(1) keeps a session open for the pool's lifetime, which protects
+    // this database from the stale-database cleanup of tests in other processes.
+    let opts = PgConnectOptions::from_str(&admin_url)?.database(&db_name);
+    let pool = PgPoolOptions::new()
+        .min_connections(1)
+        .connect_with(opts)
+        .await?;
+    drop(guard);
+
+    Ok(pool)
 }
 
 #[derive(Debug)]
@@ -137,54 +150,21 @@ impl AsyncWalletPersister for TestStore {
     }
 }
 
-pub async fn _drop_tables() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
-    let pool = Pool::<Postgres>::connect(&url.clone()).await?;
-
-    let mut tx = pool.begin().await?;
-
-    // Drop tables in reverse order of creation to handle foreign key constraints
-    let queries = [
-        r#"DROP INDEX IF EXISTS "bdk_wallet"."idx_anchor_tx_txid""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."anchor_tx""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."txout""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."tx""#,
-        r#"DROP INDEX IF EXISTS "bdk_wallet"."idx_block_height""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."block""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."keychain""#,
-        r#"DROP TABLE IF EXISTS "bdk_wallet"."network""#,
-        r#"DROP SCHEMA IF EXISTS "bdk_wallet" CASCADE"#,
-    ];
-
-    // Execute each query separately
-    for query in &queries {
-        sqlx::query(query).execute(&mut *tx).await?;
-    }
-
-    tx.commit().await?;
-
-    Ok(())
-}
-
 async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore>> {
     let mut stores: Vec<TestStore> = Vec::new();
 
-    // Set up postgres database URL (you might want to use a test-specific database)
-    let url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
-    let pool = Pool::<Postgres>::connect(&url.clone()).await?;
-
-    // Drop all before creating new store for testing
-    pool.drop_all().await?;
+    let pool = create_test_pg_pool().await?;
     let postgres_store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
         .migrate(true)
-        .build_with_url(&url)
+        .pool(pool)
+        .build()
         .await?;
     stores.push(TestStore::Postgres(postgres_store));
 
-    // Setup sqlite in-memory database
-    let pool = SqlitePool::connect(":memory:").await?;
-    let sqlite_store = Store::<Sqlite>::new(pool.clone(), wallet_name.clone(), true).await?;
+    // Setup sqlite in-memory database. `new_with_url(None, ..)` configures the
+    // single-connection pool a shared in-memory database requires.
+    let sqlite_store = Store::<Sqlite>::new_with_url(None, wallet_name.clone(), true).await?;
     stores.push(TestStore::Sqlite(sqlite_store));
 
     Ok(stores)

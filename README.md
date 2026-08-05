@@ -11,18 +11,17 @@ This crate is still **EXPERIMENTAL** do not use with mainnet wallets.
    brew update
    brew install postgresql
    ```
-2. Create empty test database:
+2. Set DATABASE_TEST_URL to a postgres server the tests may use:
    ```
-   psql postgres
-   postgres=# create database test_bdk_wallet;
+   export DATABASE_TEST_URL=postgresql://localhost/postgres
    ```
-3. Set DATABASE_URL to test database:
+   The connected role must be allowed to `CREATE DATABASE`: every test creates
+   (and later cleans up) its own uniquely named `bdk_sqlx_test_*` database, so
+   tests never touch existing data and are safe to run in parallel. Do not
+   point this at a production server.
+3. Run tests:
    ```
-   export DATABASE_TEST_URL=postgresql://localhost/test_bdk_wallet
-   ```
-4. Run tests, must use a single test thread since we reuse the postgres db:
-   ```
-   cargo test -- --test-threads=1
+   cargo test
    ```
    
 ## Example
