@@ -15,6 +15,12 @@ use std::pin::Pin;
 use bdk_wallet::bitcoin;
 use bdk_wallet::bitcoin::{BlockHash, Network, Txid};
 use bdk_wallet::chain::miniscript;
+/// Re-export of the [`sqlx`] crate this library is built on.
+///
+/// Consumers that construct pools themselves should import sqlx types through this
+/// re-export so their sqlx version always matches the one this crate links against.
+/// Note this couples the crate's public API to sqlx's major version: a sqlx major
+/// bump is a breaking change for this crate as well.
 pub use sqlx;
 use sqlx::Pool;
 use sqlx::{Database, PgPool};
