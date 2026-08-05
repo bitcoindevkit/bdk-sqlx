@@ -23,7 +23,7 @@ use sqlx::{Database, PgPool};
 #[derive(Debug, thiserror::Error)]
 pub enum BdkSqlxError {
     /// bitcoin parse hex error
-    #[error("bitoin parse hex error: {0}")]
+    #[error("bitcoin parse hex error: {0}")]
     HexToArray(#[from] bitcoin::hex::HexToArrayError),
     /// bitcoin consensus decode error
     #[error("bitcoin consensus decode error: {0}")]
@@ -79,7 +79,7 @@ pub enum BdkSqlxError {
     #[error("Network Missing")]
     MissingNetwork,
     /// Config error
-    #[error("Cant initialize Postgres connection")]
+    #[error("No database connection pool provided to the builder")]
     MissingPool,
     /// Config error
     #[error("Network Failed to set")]
