@@ -122,7 +122,7 @@ enum TestStore {
 impl AsyncWalletPersister for TestStore {
     type Error = BdkSqlxError;
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     fn initialize<'a>(store: &'a mut Self) -> FutureResult<'a, ChangeSet, Self::Error>
     where
         Self: 'a,
@@ -134,7 +134,7 @@ impl AsyncWalletPersister for TestStore {
         }
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     fn persist<'a>(
         store: &'a mut Self,
         changeset: &'a ChangeSet,
@@ -148,6 +148,76 @@ impl AsyncWalletPersister for TestStore {
             TestStore::Sqlite(store) => Box::pin(store.write(changeset)),
         }
     }
+}
+
+#[derive(Clone)]
+struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Regression test for descriptor material leaking into tracing output: even at TRACE
+/// verbosity, spans and events emitted while creating, persisting, and loading a wallet
+/// must not record descriptors, public keys, or changesets.
+#[tokio::test]
+async fn tracing_output_contains_no_descriptor_material() -> anyhow::Result<()> {
+    use tracing::instrument::WithSubscriber;
+
+    initialize();
+
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer_buf = buf.clone();
+    let subscriber = tracing_subscriber::registry()
+        .with(EnvFilter::new("trace"))
+        .with(
+            tracing_subscriber::fmt::layer().with_writer(move || SharedWriter(writer_buf.clone())),
+        );
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    async {
+        let mut store = Store::<Sqlite>::new_with_url(None, wallet_name.clone(), true).await?;
+        let mut wallet = Wallet::create(external_desc, internal_desc)
+            .network(NETWORK)
+            .create_wallet_async(&mut store)
+            .await?;
+        let _ = wallet.reveal_next_address(External);
+        wallet.persist_async(&mut store).await?;
+        Wallet::load().load_wallet_async(&mut store).await?;
+        anyhow::Ok(())
+    }
+    .with_subscriber(subscriber)
+    .await?;
+
+    let logs = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+    assert!(!logs.is_empty(), "expected tracing output to be captured");
+    for needle in [
+        "tprv",
+        "tpub",
+        "XPub",
+        "XPrv",
+        "DescriptorXKey",
+        "PublicKey(",
+    ] {
+        assert!(
+            !logs.contains(needle),
+            "tracing output leaked descriptor material ({needle}):\n{logs}"
+        );
+    }
+    Ok(())
 }
 
 async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore>> {
