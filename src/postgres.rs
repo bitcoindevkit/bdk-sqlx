@@ -20,12 +20,11 @@ use bdk_wallet::{
     AsyncWalletPersister, ChangeSet, KeychainKind,
     KeychainKind::{External, Internal},
 };
-use serde_json::json;
 use sqlx::{
     postgres::{PgPool, PgRow, Postgres},
-    FromRow, Pool, Row, Transaction,
+    Pool, Row, Transaction,
 };
-use tracing::{info, trace, warn};
+use tracing::{trace, warn};
 
 // First party imports
 use super::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
@@ -778,32 +777,5 @@ pub async fn local_chain_changeset_persist_to_postgres(
         }
     }
 
-    Ok(())
-}
-
-/// Collects information on all the wallets in the database and dumps it to stdout.
-#[tracing::instrument]
-pub async fn easy_backup(db: Pool<Postgres>) -> Result<()> {
-    trace!("Starting easy backup");
-
-    let statement = r#"SELECT * FROM "bdk_wallet"."keychain""#;
-
-    #[derive(serde::Serialize, FromRow)]
-    struct KeychainEntry {
-        wallet_name: String,
-        keychainkind: String,
-        descriptor: String,
-        descriptor_id: Vec<u8>,
-        last_revealed: i32,
-    }
-
-    let results = sqlx::query_as::<_, KeychainEntry>(statement)
-        .fetch_all(&db)
-        .await?;
-
-    let json_array = json!(results);
-    println!("{}", serde_json::to_string_pretty(&json_array)?);
-
-    info!("Easy backup completed successfully");
     Ok(())
 }

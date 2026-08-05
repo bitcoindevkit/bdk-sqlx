@@ -16,11 +16,10 @@ use bdk_wallet::chain as bdk_chain;
 use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
 use bdk_wallet::KeychainKind::{External, Internal};
 use bdk_wallet::{AsyncWalletPersister, ChangeSet, KeychainKind};
-use serde_json::json;
 use sqlx::sqlite::SqliteRow;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::sqlx_macros::migrate;
-use sqlx::{sqlite::Sqlite, FromRow, Pool, Row, Transaction};
+use sqlx::{sqlite::Sqlite, Pool, Row, Transaction};
 use tracing::trace;
 
 impl AsyncWalletPersister for Store<Sqlite> {
@@ -479,32 +478,4 @@ pub async fn local_chain_changeset_persist_to_sqlite(
     }
 
     Ok(())
-}
-
-/// Collects information on all the wallets in the database and dumps it to stdout.
-#[tracing::instrument(skip_all)]
-pub async fn easy_backup(db: Pool<Sqlite>) -> Result<(), BdkSqlxError> {
-    trace!("Starting easy backup");
-
-    let statement = "SELECT * FROM keychain";
-
-    let results = sqlx::query_as::<_, KeychainEntry>(statement)
-        .fetch_all(&db)
-        .await?;
-
-    let json_array = json!(results);
-    println!("{}", serde_json::to_string_pretty(&json_array)?);
-
-    trace!("Easy backup completed successfully");
-    Ok(())
-}
-
-/// Represents a row in the keychain table.
-#[derive(serde::Serialize, FromRow)]
-struct KeychainEntry {
-    wallet_name: String,
-    keychainkind: String,
-    descriptor: String,
-    descriptor_id: Vec<u8>,
-    last_revealed: i32,
 }
