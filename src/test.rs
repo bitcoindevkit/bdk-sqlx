@@ -150,6 +150,68 @@ impl AsyncWalletPersister for TestStore {
     }
 }
 
+/// A reorg that replaces the block at a height with a different hash must leave exactly
+/// one row for that height (the old row's anchors cascade away), not accumulate
+/// duplicate rows that make loads nondeterministic.
+#[tokio::test]
+async fn reorg_replaced_block_leaves_single_row() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    let stores = create_test_stores(wallet_name.clone()).await?;
+    for mut store in stores {
+        let mut wallet = Wallet::create(external_desc, internal_desc)
+            .network(NETWORK)
+            .create_wallet_async(&mut store)
+            .await?;
+        let _txid = insert_fake_tx(
+            &mut wallet,
+            Amount::from_sat(20_000),
+            Amount::from_sat(10_000),
+            Amount::from_sat(1_000),
+        );
+        assert!(wallet.persist_async(&mut store).await?);
+
+        // Replace the block at height 2000 with a different hash, as a reorg does.
+        let new_hash = BlockHash::from_byte_array([2u8; 32]);
+        let mut reorg = ChangeSet::default();
+        reorg.local_chain.blocks.insert(2_000, Some(new_hash));
+        TestStore::persist(&mut store, &reorg).await?;
+
+        let cs = TestStore::initialize(&mut store).await?;
+        assert_eq!(cs.local_chain.blocks.get(&2_000), Some(&Some(new_hash)));
+        // anchors referenced the replaced block and must be gone with it
+        assert!(cs.tx_graph.anchors.is_empty());
+
+        // exactly one row must remain at that height
+        let rows_at_height: i64 = match &store {
+            TestStore::Postgres(store) => sqlx::query_scalar(
+                r#"SELECT count(*) FROM "bdk_wallet"."block" WHERE wallet_name=$1 AND height=2000"#,
+            )
+            .bind(&wallet_name)
+            .fetch_one(&store.pool)
+            .await?,
+            TestStore::Sqlite(store) => {
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM block WHERE wallet_name=$1 AND height=2000",
+                )
+                .bind(&wallet_name)
+                .fetch_one(&store.pool)
+                .await?
+            }
+        };
+        assert_eq!(rows_at_height, 1);
+    }
+    Ok(())
+}
+
 /// Re-persisting a merged/full changeset must be idempotent (upsert, not bare INSERT),
 /// and updating last_revealed for a keychain that was never stored must error rather
 /// than silently updating 0 rows and losing derivation state.

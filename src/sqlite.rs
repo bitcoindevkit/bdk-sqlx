@@ -492,6 +492,17 @@ pub async fn local_chain_changeset_persist_to_sqlite(
     for (&height, &hash) in &changeset.blocks {
         match hash {
             Some(hash) => {
+                // A reorg can replace the block at this height with a different hash;
+                // remove the stale row first (its anchors cascade away) so exactly one
+                // row per (wallet_name, height) remains.
+                sqlx::query(
+                    "DELETE FROM block WHERE wallet_name = $1 AND height = $2 AND hash != $3",
+                )
+                .bind(wallet_name)
+                .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
+                .bind(hash.to_string())
+                .execute(&mut **db_tx)
+                .await?;
                 sqlx::query(
                     "INSERT INTO block (wallet_name, hash, height) VALUES ($1, $2, $3)
                      ON CONFLICT (wallet_name, hash) DO UPDATE SET height = $3",
