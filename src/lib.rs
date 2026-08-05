@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use bdk_wallet::bitcoin;
-use bdk_wallet::bitcoin::Network;
+use bdk_wallet::bitcoin::{BlockHash, Network, Txid};
 use bdk_wallet::chain::miniscript;
 pub use sqlx;
 use sqlx::Pool;
@@ -24,6 +24,25 @@ pub enum BdkSqlxError {
     /// bitcoin parse hex error
     #[error("bitoin parse hex error: {0}")]
     HexToArray(#[from] bitcoin::hex::HexToArrayError),
+    /// bitcoin consensus decode error
+    #[error("bitcoin consensus decode error: {0}")]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    /// stored transaction bytes decode to a different txid than the stored txid
+    #[error("decoded transaction txid {computed} does not match stored txid {stored}")]
+    TxidMismatch {
+        /// txid stored alongside the transaction bytes
+        stored: Txid,
+        /// txid computed from the decoded transaction
+        computed: Txid,
+    },
+    /// stored anchor references a different block hash than the stored block_hash
+    #[error("anchor block hash {computed} does not match stored block_hash {stored}")]
+    AnchorBlockHashMismatch {
+        /// block hash stored in the block_hash column
+        stored: BlockHash,
+        /// block hash contained in the anchor payload
+        computed: BlockHash,
+    },
     /// miniscript error
     #[error("miniscript error: {0}")]
     Miniscript(#[from] miniscript::Error),

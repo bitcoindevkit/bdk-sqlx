@@ -10,10 +10,7 @@ use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
 };
 use bdk_wallet::bitcoin::{
-    self,
-    consensus::{self, Decodable},
-    hashes::Hash,
-    Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
+    self, consensus, hashes::Hash, Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
 };
 use bdk_wallet::chain as bdk_chain;
 use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor};
@@ -296,9 +293,15 @@ pub async fn tx_graph_changeset_from_sqlite(
         let last_seen: Option<i64> = row.get("last_seen");
 
         if let Some(tx_bytes) = whole_tx {
-            if let Ok(tx) = bitcoin::Transaction::consensus_decode(&mut tx_bytes.as_slice()) {
-                changeset.txs.insert(Arc::new(tx));
+            let tx: bitcoin::Transaction = consensus::deserialize(&tx_bytes)?;
+            let computed = tx.compute_txid();
+            if computed != txid {
+                return Err(BdkSqlxError::TxidMismatch {
+                    stored: txid,
+                    computed,
+                });
             }
+            changeset.txs.insert(Arc::new(tx));
         }
         if let Some(last_seen) = last_seen {
             changeset.last_seen.insert(txid, last_seen as u64);
@@ -331,20 +334,29 @@ pub async fn tx_graph_changeset_from_sqlite(
     }
 
     // Fetch anchors
-    let rows =
-        sqlx::query("SELECT json(anchor) as anchor, txid FROM anchor_tx WHERE wallet_name = $1")
-            .bind(wallet_name)
-            .fetch_all(&mut **db_tx)
-            .await?;
+    let rows = sqlx::query(
+        "SELECT json(anchor) as anchor, txid, block_hash FROM anchor_tx WHERE wallet_name = $1",
+    )
+    .bind(wallet_name)
+    .fetch_all(&mut **db_tx)
+    .await?;
 
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
         let txid: String = row.get("txid");
         let txid = Txid::from_str(&txid)?;
+        let block_hash: String = row.get("block_hash");
+        let block_hash = BlockHash::from_str(&block_hash)?;
 
-        if let Ok(anchor) = serde_json::from_value::<ConfirmationBlockTime>(anchor) {
-            changeset.anchors.insert((anchor, txid));
+        let anchor: ConfirmationBlockTime = serde_json::from_value(anchor)?;
+        let computed = anchor.anchor_block().hash;
+        if computed != block_hash {
+            return Err(BdkSqlxError::AnchorBlockHashMismatch {
+                stored: block_hash,
+                computed,
+            });
         }
+        changeset.anchors.insert((anchor, txid));
     }
 
     Ok(changeset)

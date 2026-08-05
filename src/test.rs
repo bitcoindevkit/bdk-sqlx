@@ -528,6 +528,244 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
     Ok(())
 }
 
+const BOGUS_TXID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+async fn corrupt_and_check_postgres(
+    store: &Store<Postgres>,
+    wallet_name: &str,
+    txid: Txid,
+) -> anyhow::Result<()> {
+    let pool = store.pool.clone();
+    let txid = txid.to_string();
+
+    let valid_tx: Vec<u8> = sqlx::query_scalar(
+        r#"SELECT whole_tx FROM "bdk_wallet"."tx" WHERE wallet_name=$1 AND txid=$2"#,
+    )
+    .bind(wallet_name)
+    .bind(&txid)
+    .fetch_one(&pool)
+    .await?;
+    let set_whole_tx =
+        r#"UPDATE "bdk_wallet"."tx" SET whole_tx=$3 WHERE wallet_name=$1 AND txid=$2"#;
+
+    // undecodable tx bytes must fail the load, not silently drop the tx
+    sqlx::query(set_whole_tx)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::Consensus(_)));
+
+    // trailing bytes after a valid tx must be rejected
+    let mut trailing = valid_tx.clone();
+    trailing.push(0);
+    sqlx::query(set_whole_tx)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(trailing)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::Consensus(_)));
+
+    sqlx::query(set_whole_tx)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(&valid_tx)
+        .execute(&pool)
+        .await?;
+
+    // tx bytes that decode to a different txid than the stored txid must be rejected
+    sqlx::query(r#"INSERT INTO "bdk_wallet"."tx" (wallet_name, txid, whole_tx) VALUES ($1,$2,$3)"#)
+        .bind(wallet_name)
+        .bind(BOGUS_TXID)
+        .bind(&valid_tx)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::TxidMismatch { .. }));
+    sqlx::query(r#"DELETE FROM "bdk_wallet"."tx" WHERE wallet_name=$1 AND txid=$2"#)
+        .bind(wallet_name)
+        .bind(BOGUS_TXID)
+        .execute(&pool)
+        .await?;
+
+    // an unparseable anchor must fail the load, not silently drop the anchor
+    let valid_anchor: serde_json::Value = sqlx::query_scalar(
+        r#"SELECT anchor FROM "bdk_wallet"."anchor_tx" WHERE wallet_name=$1 AND txid=$2"#,
+    )
+    .bind(wallet_name)
+    .bind(&txid)
+    .fetch_one(&pool)
+    .await?;
+    let set_anchor =
+        r#"UPDATE "bdk_wallet"."anchor_tx" SET anchor=$3 WHERE wallet_name=$1 AND txid=$2"#;
+    sqlx::query(set_anchor)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(serde_json::json!({"bogus": 1}))
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::SerdeJson(_)));
+
+    // an anchor whose payload points at a different block than the stored block_hash
+    let mut mutated = valid_anchor.clone();
+    mutated["block_id"]["hash"] = serde_json::json!(BOGUS_TXID);
+    sqlx::query(set_anchor)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(mutated)
+        .execute(&pool)
+        .await?;
+    assert_matches!(
+        store.read().await,
+        Err(BdkSqlxError::AnchorBlockHashMismatch { .. })
+    );
+
+    sqlx::query(set_anchor)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(valid_anchor)
+        .execute(&pool)
+        .await?;
+    store.read().await?;
+    Ok(())
+}
+
+async fn corrupt_and_check_sqlite(
+    store: &Store<Sqlite>,
+    wallet_name: &str,
+    txid: Txid,
+) -> anyhow::Result<()> {
+    let pool = store.pool.clone();
+    let txid = txid.to_string();
+
+    let valid_tx: Vec<u8> =
+        sqlx::query_scalar("SELECT whole_tx FROM tx WHERE wallet_name=$1 AND txid=$2")
+            .bind(wallet_name)
+            .bind(&txid)
+            .fetch_one(&pool)
+            .await?;
+    let set_whole_tx = "UPDATE tx SET whole_tx=$3 WHERE wallet_name=$1 AND txid=$2";
+
+    // undecodable tx bytes must fail the load, not silently drop the tx
+    sqlx::query(set_whole_tx)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::Consensus(_)));
+
+    // trailing bytes after a valid tx must be rejected
+    let mut trailing = valid_tx.clone();
+    trailing.push(0);
+    sqlx::query(set_whole_tx)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(trailing)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::Consensus(_)));
+
+    sqlx::query(set_whole_tx)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(&valid_tx)
+        .execute(&pool)
+        .await?;
+
+    // tx bytes that decode to a different txid than the stored txid must be rejected
+    sqlx::query("INSERT INTO tx (wallet_name, txid, whole_tx) VALUES ($1,$2,$3)")
+        .bind(wallet_name)
+        .bind(BOGUS_TXID)
+        .bind(&valid_tx)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::TxidMismatch { .. }));
+    sqlx::query("DELETE FROM tx WHERE wallet_name=$1 AND txid=$2")
+        .bind(wallet_name)
+        .bind(BOGUS_TXID)
+        .execute(&pool)
+        .await?;
+
+    // an unparseable anchor must fail the load, not silently drop the anchor
+    let valid_anchor: serde_json::Value =
+        sqlx::query_scalar("SELECT json(anchor) FROM anchor_tx WHERE wallet_name=$1 AND txid=$2")
+            .bind(wallet_name)
+            .bind(&txid)
+            .fetch_one(&pool)
+            .await?;
+    let set_anchor = "UPDATE anchor_tx SET anchor=jsonb($3) WHERE wallet_name=$1 AND txid=$2";
+    sqlx::query(set_anchor)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(serde_json::json!({"bogus": 1}).to_string())
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::SerdeJson(_)));
+
+    // an anchor whose payload points at a different block than the stored block_hash
+    let mut mutated = valid_anchor.clone();
+    mutated["block_id"]["hash"] = serde_json::json!(BOGUS_TXID);
+    sqlx::query(set_anchor)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(mutated.to_string())
+        .execute(&pool)
+        .await?;
+    assert_matches!(
+        store.read().await,
+        Err(BdkSqlxError::AnchorBlockHashMismatch { .. })
+    );
+
+    sqlx::query(set_anchor)
+        .bind(wallet_name)
+        .bind(&txid)
+        .bind(valid_anchor.to_string())
+        .execute(&pool)
+        .await?;
+    store.read().await?;
+    Ok(())
+}
+
+/// Regression test for silent data loss: corrupted rows must produce an explicit error
+/// on load instead of an `Ok` changeset that is quietly missing data.
+#[tokio::test]
+async fn corrupt_rows_error_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    let stores = create_test_stores(wallet_name.clone()).await?;
+    for mut store in stores {
+        let mut wallet = Wallet::create(external_desc, internal_desc)
+            .network(NETWORK)
+            .create_wallet_async(&mut store)
+            .await?;
+        let txid = insert_fake_tx(
+            &mut wallet,
+            Amount::from_sat(20_000),
+            Amount::from_sat(10_000),
+            Amount::from_sat(1_000),
+        );
+        assert!(wallet.persist_async(&mut store).await?);
+
+        match &store {
+            TestStore::Postgres(store) => {
+                corrupt_and_check_postgres(store, &wallet_name, txid).await?
+            }
+            TestStore::Sqlite(store) => corrupt_and_check_sqlite(store, &wallet_name, txid).await?,
+        }
+    }
+    Ok(())
+}
+
 /// Regression test for a reorg wedging persistence: deleting a block that still has
 /// `anchor_tx` rows referencing it must succeed (the anchors are dropped with the block)
 /// instead of aborting the whole persist transaction with a FK violation.
