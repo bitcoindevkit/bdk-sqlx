@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
 use assert_matches::assert_matches;
-use bdk_chain::{BlockId, ConfirmationBlockTime};
+use bdk_chain::{BlockId, ConfirmationBlockTime, DescriptorId};
 use bdk_wallet::{
     bitcoin, chain as bdk_chain,
     descriptor::ExtendedDescriptor,
@@ -148,6 +148,50 @@ impl AsyncWalletPersister for TestStore {
             TestStore::Sqlite(store) => Box::pin(store.write(changeset)),
         }
     }
+}
+
+/// Re-persisting a merged/full changeset must be idempotent (upsert, not bare INSERT),
+/// and updating last_revealed for a keychain that was never stored must error rather
+/// than silently updating 0 rows and losing derivation state.
+#[tokio::test]
+async fn repersisting_full_changeset_is_idempotent() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    let stores = create_test_stores(wallet_name).await?;
+    for mut store in stores {
+        let mut wallet = Wallet::create(external_desc, internal_desc)
+            .network(NETWORK)
+            .create_wallet_async(&mut store)
+            .await?;
+        let _ = wallet.reveal_next_address(External);
+        assert!(wallet.persist_async(&mut store).await?);
+
+        // A merged changeset carries the descriptors and network again; persisting it
+        // previously failed with a unique-constraint violation on the bare INSERTs.
+        let full = TestStore::initialize(&mut store).await?;
+        assert!(full.descriptor.is_some() && full.network.is_some());
+        TestStore::persist(&mut store, &full).await?;
+
+        // last_revealed for a keychain that is not stored must error loudly
+        let mut cs = ChangeSet::default();
+        cs.indexer.last_revealed.insert(
+            DescriptorId(bitcoin::hashes::sha256::Hash::hash(b"missing keychain")),
+            5,
+        );
+        assert_matches!(
+            TestStore::persist(&mut store, &cs).await,
+            Err(BdkSqlxError::QueryError { .. })
+        );
+    }
+    Ok(())
 }
 
 async fn corrupt_ranges_postgres(store: &Store<Postgres>, wallet_name: &str) -> anyhow::Result<()> {

@@ -475,7 +475,8 @@ async fn insert_descriptor(
     };
 
     sqlx::query(
-        r#"INSERT INTO "bdk_wallet"."keychain" (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO "bdk_wallet"."keychain" (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (wallet_name, keychainkind) DO UPDATE SET descriptor = excluded.descriptor, descriptor_id = excluded.descriptor_id"#,
     )
         .bind(wallet_name)
         .bind(keychain)
@@ -499,15 +500,18 @@ async fn insert_network(
     network: Network,
 ) -> Result<()> {
     trace!("insert network");
-    sqlx::query(r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2)"#)
-        .bind(wallet_name)
-        .bind(network.to_string())
-        .execute(&mut **db_tx)
-        .await
-        .map_err(|e| BdkSqlxError::QueryError {
-            table: "insert network".to_string(),
-            source: e,
-        })?;
+    sqlx::query(
+        r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2)
+         ON CONFLICT (wallet_name) DO UPDATE SET name = excluded.name"#,
+    )
+    .bind(wallet_name)
+    .bind(network.to_string())
+    .execute(&mut **db_tx)
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "insert network".to_string(),
+        source: e,
+    })?;
 
     Ok(())
 }
@@ -522,7 +526,7 @@ async fn update_last_revealed(
 ) -> Result<()> {
     trace!("update last revealed");
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"UPDATE "bdk_wallet"."keychain" SET last_revealed = $1 WHERE wallet_name = $2 AND descriptor_id = $3"#,
     )
     .bind(crate::checked_conv::<_, i32>(last_revealed, "keychain.last_revealed")?)
@@ -534,6 +538,14 @@ async fn update_last_revealed(
             table: "update keychain".to_string(),
             source: e,
         })?;
+
+    // Silently updating 0 rows would lose derivation state and cause address reuse.
+    if result.rows_affected() == 0 {
+        return Err(BdkSqlxError::QueryError {
+            table: "keychain".to_string(),
+            source: sqlx::Error::RowNotFound,
+        });
+    }
 
     Ok(())
 }

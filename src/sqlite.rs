@@ -231,7 +231,8 @@ async fn insert_descriptor(
     };
 
     sqlx::query(
-        "INSERT INTO keychain (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO keychain (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (wallet_name, keychainkind) DO UPDATE SET descriptor = excluded.descriptor, descriptor_id = excluded.descriptor_id",
     )
         .bind(wallet_name)
         .bind(keychain)
@@ -251,11 +252,14 @@ async fn insert_network(
     network: Network,
 ) -> Result<(), BdkSqlxError> {
     trace!("insert network");
-    sqlx::query("INSERT INTO network (wallet_name, name) VALUES ($1, $2)")
-        .bind(wallet_name)
-        .bind(network.to_string())
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO network (wallet_name, name) VALUES ($1, $2)
+         ON CONFLICT (wallet_name) DO UPDATE SET name = excluded.name",
+    )
+    .bind(wallet_name)
+    .bind(network.to_string())
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }
@@ -270,7 +274,7 @@ async fn update_last_revealed(
 ) -> Result<(), BdkSqlxError> {
     trace!("update last revealed");
 
-    sqlx::query::<Sqlite>(
+    let result = sqlx::query::<Sqlite>(
         "UPDATE keychain SET last_revealed = $1 WHERE wallet_name = $2 AND descriptor_id = $3",
     )
     .bind(crate::checked_conv::<_, i32>(
@@ -281,6 +285,14 @@ async fn update_last_revealed(
     .bind(descriptor_id.to_byte_array().as_slice())
     .execute(&mut **tx)
     .await?;
+
+    // Silently updating 0 rows would lose derivation state and cause address reuse.
+    if result.rows_affected() == 0 {
+        return Err(BdkSqlxError::QueryError {
+            table: "keychain".to_string(),
+            source: sqlx::Error::RowNotFound,
+        });
+    }
 
     Ok(())
 }
