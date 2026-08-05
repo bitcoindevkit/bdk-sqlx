@@ -9,9 +9,7 @@ serde = { version = "1.0.208", features = ["derive"] }
 serde_json = "1.0.125"
 sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring","derive", "postgres", "sqlite", "json", "chrono", "uuid", "sqlx-macros", "migrate"] }
 thiserror = "1"
-tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde_json", "json"] }
 
 [dev-dependencies]
 assert_matches = "1.5.0"
@@ -19,6 +17,8 @@ anyhow = "1.0.89"
 bdk_electrum = { version = "0.20.1"}
 bdk_wallet = { version = "1.2.0", features = ["test-utils"] }
 rustls = "0.23.14"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde_json", "json"] }
 
 [[example]]
 name = "bdk_sqlx_postgres"
