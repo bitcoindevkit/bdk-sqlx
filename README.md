@@ -4,6 +4,17 @@
 
 This crate is still **EXPERIMENTAL** do not use with mainnet wallets.
 
+## Security notes
+
+- Without an explicit `sslmode`, postgres connections default to `prefer`, which
+  silently falls back to plaintext if TLS negotiation fails. For any deployment where
+  the database is not on the same host, require TLS in the connection URL
+  (`?sslmode=require`, or `verify-full` to also authenticate the server).
+- Connect with a least-privilege database role: the store only needs DML on the
+  `bdk_wallet` schema (plus DDL when running migrations).
+- Stored descriptors are sensitive (xpubs reveal the entire wallet history and
+  structure); protect database backups and access accordingly.
+
 ## Testing
 
 1. Install postgresql with `psql` tool. For example (macos):

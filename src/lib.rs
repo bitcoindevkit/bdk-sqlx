@@ -1,6 +1,7 @@
 //! bdk-sqlx
 
 #![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 mod postgres;
 mod sqlite;

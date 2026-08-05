@@ -188,6 +188,14 @@ impl PgStoreBuilder {
     /// This is a convenience method that creates a connection pool from the URL
     /// and then builds the [`Store`] using that pool.
     ///
+    /// # Security
+    ///
+    /// Without an explicit `sslmode`, postgres connections default to `prefer`, which
+    /// silently falls back to plaintext if TLS negotiation fails. For any deployment
+    /// where the database is not on the same host, require TLS in the URL (e.g.
+    /// `?sslmode=require`, or `verify-full` to also authenticate the server), and
+    /// connect with a least-privilege database role.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
