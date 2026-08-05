@@ -528,6 +528,62 @@ async fn single_descriptor_wallet_persist_and_recover() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Regression test for a reorg wedging persistence: deleting a block that still has
+/// `anchor_tx` rows referencing it must succeed (the anchors are dropped with the block)
+/// instead of aborting the whole persist transaction with a FK violation.
+#[tokio::test]
+async fn reorged_out_anchored_block_can_be_deleted() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    let stores = create_test_stores(wallet_name).await?;
+    for mut store in stores {
+        let mut wallet = Wallet::create(external_desc, internal_desc)
+            .network(NETWORK)
+            .create_wallet_async(&mut store)
+            .await?;
+
+        // Anchor transactions to blocks and persist, so anchor_tx rows reference block rows.
+        let _txid = insert_fake_tx(
+            &mut wallet,
+            Amount::from_sat(20_000),
+            Amount::from_sat(10_000),
+            Amount::from_sat(1_000),
+        );
+        assert!(wallet.persist_async(&mut store).await?);
+
+        // Simulate a reorg disconnecting the anchored block: BDK's local_chain
+        // changeset carries (height, None), which deletes the block row.
+        let mut reorg = ChangeSet::default();
+        reorg.local_chain.blocks.insert(2_000, None);
+        TestStore::persist(&mut store, &reorg)
+            .await
+            .expect("persisting a reorg over an anchored block must not fail");
+
+        // The disconnected block and its anchors are gone; the rest survives.
+        let changeset = TestStore::initialize(&mut store).await?;
+        assert!(!changeset.local_chain.blocks.contains_key(&2_000));
+        assert!(changeset.tx_graph.anchors.is_empty());
+        assert_eq!(changeset.tx_graph.txs.len(), 2);
+
+        // Persistence still works afterwards.
+        let mut new_tip = ChangeSet::default();
+        new_tip
+            .local_chain
+            .blocks
+            .insert(2_001, Some(BlockHash::from_byte_array([1u8; 32])));
+        TestStore::persist(&mut store, &new_tip).await?;
+    }
+    Ok(())
+}
+
 #[tracing::instrument]
 #[tokio::test]
 async fn two_wallets_load() -> anyhow::Result<()> {
