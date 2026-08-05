@@ -251,6 +251,10 @@ impl Store<Postgres> {
             Self::changeset_from_row(&mut db_tx, &mut changeset, row, &self.wallet_name).await?;
         }
 
+        // The reads happened inside one transaction for a consistent snapshot;
+        // close it out explicitly instead of relying on drop-rollback.
+        db_tx.commit().await?;
+
         Ok(changeset)
     }
 

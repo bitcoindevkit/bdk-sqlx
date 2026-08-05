@@ -119,6 +119,10 @@ impl Store<Sqlite> {
             Self::changeset_from_row(&mut tx, &mut changeset, row, &self.wallet_name).await?;
         }
 
+        // The reads happened inside one transaction for a consistent snapshot;
+        // close it out explicitly instead of relying on drop-rollback.
+        tx.commit().await?;
+
         Ok(changeset)
     }
 
