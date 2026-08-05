@@ -308,7 +308,7 @@ impl Store<Postgres> {
 }
 
 /// Insert keychain descriptors.
-#[tracing::instrument(skip(db_tx, descriptor))]
+#[tracing::instrument(skip_all)]
 async fn insert_descriptor(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -355,7 +355,7 @@ async fn insert_descriptor(
 }
 
 /// Insert network.
-#[tracing::instrument(skip(db_tx, network))]
+#[tracing::instrument(skip_all)]
 async fn insert_network(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -379,7 +379,7 @@ async fn insert_network(
 }
 
 /// Update keychain last revealed
-#[tracing::instrument(skip(db_tx, descriptor_id, last_revealed))]
+#[tracing::instrument(skip_all)]
 async fn update_last_revealed(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -418,7 +418,7 @@ async fn update_last_revealed(
 
 /// Select transactions, txouts, and anchors.
 #[tracing::instrument(skip(db_tx))]
-pub async fn tx_graph_changeset_from_postgres(
+pub(crate) async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
 ) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>> {
@@ -527,7 +527,7 @@ pub async fn tx_graph_changeset_from_postgres(
 
 /// Insert transactions, txouts, and anchors.
 #[tracing::instrument(skip(db_tx, changeset))]
-pub async fn tx_graph_changeset_persist_to_postgres(
+pub(crate) async fn tx_graph_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     changeset: &tx_graph::ChangeSet<ConfirmationBlockTime>,
@@ -552,10 +552,16 @@ pub async fn tx_graph_changeset_persist_to_postgres(
     for (&txid, &last_seen) in &changeset.last_seen {
         // Upsert a stub row when the full tx is not stored yet; a bare UPDATE
         // would affect 0 rows and silently drop the timestamp. whole_tx stays
-        // NULL until a changeset carrying the full tx fills it in.
+        // NULL until a changeset carrying the full tx fills it in. The
+        // conflict update never moves the timestamp backwards: bdk_chain's own
+        // Merge only ever increases last_seen, and a stale or replayed
+        // changeset must not regress the stored value (the same guarantee
+        // update_last_revealed enforces for derivation state).
         sqlx::query(
             r#"INSERT INTO "bdk_wallet"."tx" (wallet_name, txid, last_seen) VALUES ($1, $2, $3)
-             ON CONFLICT (wallet_name, txid) DO UPDATE SET last_seen = $3"#,
+             ON CONFLICT (wallet_name, txid) DO UPDATE SET
+                 last_seen = CASE WHEN tx.last_seen IS NULL OR $3 > tx.last_seen
+                                  THEN $3 ELSE tx.last_seen END"#,
         )
         .bind(wallet_name)
         .bind(txid.to_string())
@@ -610,7 +616,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 
 /// Select blocks.
 #[tracing::instrument(skip(db_tx))]
-pub async fn local_chain_changeset_from_postgres(
+pub(crate) async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
 ) -> Result<local_chain::ChangeSet> {
@@ -642,12 +648,35 @@ pub async fn local_chain_changeset_from_postgres(
 
 /// Insert blocks.
 #[tracing::instrument(skip(db_tx, changeset))]
-pub async fn local_chain_changeset_persist_to_postgres(
+pub(crate) async fn local_chain_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     changeset: &local_chain::ChangeSet,
 ) -> Result<()> {
     trace!("local chain changeset to postgres");
+    if changeset.blocks.is_empty() {
+        return Ok(());
+    }
+    // The delete+insert below keeps exactly one row per (wallet_name, height)
+    // and must observe every committed row at that height. A concurrent writer
+    // doing the same for a different hash at the same height is invisible to
+    // the DELETE until it commits, and its INSERT then loses to the
+    // idx_block_wallet_height unique index (which the upsert's
+    // (wallet_name, hash) conflict target does not cover), aborting its whole
+    // changeset with a raw 23505. Serialize the block-table section per wallet
+    // instead: the loser waits for the winner to commit, then sees and
+    // replaces its row (last-writer-wins), exactly as if the writes had been
+    // issued sequentially. The lock is transaction-scoped, so commit or
+    // rollback releases it. sqlite needs no equivalent: its single-writer
+    // lock already serializes the same interleaving.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("bdk_sqlx_local_chain:{wallet_name}"))
+        .execute(&mut **db_tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "lock local_chain".to_string(),
+            source: e,
+        })?;
     // The block table keys rows by (wallet_name, hash), so a changeset mapping
     // one hash to several heights cannot be represented: persisting it would
     // silently collapse to a single row and lose checkpoints. Reject it loudly

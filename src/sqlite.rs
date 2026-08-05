@@ -75,12 +75,24 @@ impl Store<Sqlite> {
         migrate: bool,
     ) -> Result<Self, BdkSqlxError> {
         trace!("new sqlite store");
+        let store = Self { pool, wallet_name };
         if migrate {
             trace!("migrate");
-            migrate!("./migrations/sqlite").run(&pool).await?;
+            store.migrate().await?;
         }
         crate::initialize_network(network)?;
-        Ok(Self { pool, wallet_name })
+        Ok(store)
+    }
+
+    /// Runs the versioned migrations in `migrations/sqlite` for this [`Store`].
+    ///
+    /// Mirrors [`Store::<Postgres>::migrate`]: migrations are recorded in
+    /// sqlx's bookkeeping table, so re-running them is a no-op.
+    #[tracing::instrument(skip_all)]
+    pub async fn migrate(&self) -> Result<(), BdkSqlxError> {
+        trace!("migrating bdk sqlx");
+        migrate!("./migrations/sqlite").run(&self.pool).await?;
+        Ok(())
     }
 
     /// Construct a new [`Store`] without an existing sqlite connection pool.
@@ -99,8 +111,124 @@ impl Store<Sqlite> {
         migrate: bool,
     ) -> Result<Store<Sqlite>, BdkSqlxError> {
         trace!("new store with url");
+        crate::SqliteStoreBuilder::new(wallet_name)
+            .network(network)
+            .migrate(migrate)
+            .build_with_url(url.as_deref())
+            .await
+    }
+}
+
+impl crate::SqliteStoreBuilder {
+    /// Creates a new builder for a [`Store`] with the given wallet name.
+    ///
+    /// # Required fields
+    /// Before building, you must set:
+    /// - `network` - The Bitcoin network to use
+    /// - Either provide a connection pool with `pool()` or a database URL with `build_with_url()`
+    ///
+    /// # Example
+    /// ```
+    /// # async fn example() -> Result<(), bdk_sqlx::BdkSqlxError> {
+    /// use bdk_wallet::bitcoin::Network;
+    /// use bdk_sqlx::SqliteStoreBuilder;
+    ///
+    /// let store = SqliteStoreBuilder::new("bdk_wallet_name".to_string())
+    ///     .network(Network::Testnet)
+    ///     .migrate(true)
+    ///     .build_with_url(Some("sqlite://bdk_wallet.sqlite?mode=rwc"))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument]
+    pub fn new(wallet_name: String) -> Self {
+        Self {
+            wallet_name,
+            pool: None,
+            migrate: false,
+            network: None,
+        }
+    }
+
+    /// Sets the database connection pool for the [`Store`].
+    ///
+    /// The pool is required to build a valid [`Store`]. If not provided,
+    /// the build operation will fail with a MissingPool error.
+    ///
+    /// # Warning
+    ///
+    /// Do not pass a pool connected to `:memory:` with more than one connection:
+    /// each sqlite connection gets its *own* private in-memory database, so a
+    /// multi-connection pool silently reads and writes different databases (and
+    /// per-connection `PRAGMA`s only apply to the connection that ran them).
+    /// Use [`SqliteStoreBuilder::build_with_url`] with `None` instead, which
+    /// configures a single-connection pool correctly.
+    pub fn pool(mut self, pool: Pool<Sqlite>) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Sets whether database migrations should be run during [`Store`] initialization.
+    ///
+    /// When set to true, the necessary database schema and tables will be created
+    /// if they don't already exist.
+    pub fn migrate(mut self, migrate: bool) -> Self {
+        self.migrate = migrate;
+        self
+    }
+
+    /// Sets the Bitcoin network for the [`Store`].
+    ///
+    /// The network is required to build a valid [`Store`]. If not provided,
+    /// the build operation will fail with a MissingNetwork error.
+    ///
+    /// The network is process-global and shared across backends: the first
+    /// store built (postgres or sqlite) fixes it for the whole process, and
+    /// later builds with a different network fail with
+    /// [`BdkSqlxError::DuplicateInitNetwork`]. Every store validates stored
+    /// and incoming data against it.
+    pub fn network(mut self, network: Network) -> Self {
+        self.network = Some(network);
+        self
+    }
+
+    /// Builds the [`Store`] with the configured options.
+    ///
+    /// This method creates a new [`Store`] instance using the options that have been
+    /// set on this builder. It requires both a network and a pool to be specified
+    /// before building.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No network has been specified (MissingNetwork)
+    /// - No pool has been specified (MissingPool)
+    /// - Migration fails
+    /// - Network initialization fails
+    pub async fn build(self) -> Result<Store<Sqlite>, BdkSqlxError> {
+        let network = self.network.ok_or(BdkSqlxError::MissingNetwork)?;
+        match self.pool {
+            Some(pool) => Store::new(pool, self.wallet_name, network, self.migrate).await,
+            None => Err(BdkSqlxError::MissingPool),
+        }
+    }
+
+    /// Builds the [`Store`] with a new connection pool created from the provided URL.
+    ///
+    /// This is a convenience method that creates a connection pool from the URL
+    /// and then builds the [`Store`] using that pool. The SQLite DB URL should
+    /// look like "sqlite://bdk_wallet.sqlite?mode=rwc". If no URL is given, a
+    /// single-connection in-memory database (useful for testing) is created.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Database connection fails
+    /// - Any error that could occur in the build() method
+    pub async fn build_with_url(self, url: Option<&str>) -> Result<Store<Sqlite>, BdkSqlxError> {
         let pool = if let Some(url) = url {
-            SqlitePool::connect(url.as_str()).await?
+            SqlitePool::connect(url).await?
         } else {
             // must limit to one connection and no timeout if using memory DB
             SqlitePoolOptions::new()
@@ -111,7 +239,7 @@ impl Store<Sqlite> {
                 .connect(":memory:")
                 .await?
         };
-        Self::new(pool, wallet_name, network, migrate).await
+        self.pool(pool).build().await
     }
 }
 
@@ -127,7 +255,11 @@ impl Store<Sqlite> {
         let row = sqlx::query("SELECT name FROM network WHERE wallet_name = $1")
             .bind(&self.wallet_name)
             .fetch_optional(&mut *tx)
-            .await?;
+            .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "read network".to_string(),
+                source: e,
+            })?;
         if let Some(row) = row {
             let network: String = row.get("name");
             changeset.network = Some(crate::parse_and_validate_network(&network)?);
@@ -142,7 +274,11 @@ impl Store<Sqlite> {
         )
         .bind(&self.wallet_name)
         .fetch_all(&mut *tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "read keychain".to_string(),
+            source: e,
+        })?;
         for row in rows {
             let keychainkind: String = row.get("keychainkind");
             let descriptor: String = row.get("descriptor");
@@ -248,7 +384,11 @@ async fn insert_descriptor(
         .bind(descriptor_str)
         .bind(descriptor_id.as_slice())
         .execute(&mut **tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert keychain".to_string(),
+            source: e,
+        })?;
 
     Ok(())
 }
@@ -268,7 +408,11 @@ async fn insert_network(
     .bind(wallet_name)
     .bind(network.to_string())
     .execute(&mut **tx)
-    .await?;
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "insert network".to_string(),
+        source: e,
+    })?;
 
     Ok(())
 }
@@ -297,7 +441,11 @@ async fn update_last_revealed(
     .bind(wallet_name)
     .bind(descriptor_id.to_byte_array().as_slice())
     .execute(&mut **tx)
-    .await?;
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "update keychain".to_string(),
+        source: e,
+    })?;
 
     // Silently updating 0 rows would lose derivation state and cause address reuse.
     if result.rows_affected() == 0 {
@@ -312,7 +460,7 @@ async fn update_last_revealed(
 
 /// Select transactions, txouts, and anchors.
 #[tracing::instrument(skip_all)]
-pub async fn tx_graph_changeset_from_sqlite(
+pub(crate) async fn tx_graph_changeset_from_sqlite(
     db_tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
 ) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>, BdkSqlxError> {
@@ -323,7 +471,11 @@ pub async fn tx_graph_changeset_from_sqlite(
     let rows = sqlx::query("SELECT txid, whole_tx, last_seen FROM tx WHERE wallet_name = $1")
         .bind(wallet_name)
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "select tx".to_string(),
+            source: e,
+        })?;
 
     for row in rows {
         let txid: String = row.get("txid");
@@ -353,7 +505,11 @@ pub async fn tx_graph_changeset_from_sqlite(
     let rows = sqlx::query("SELECT txid, vout, value, script FROM txout WHERE wallet_name = $1")
         .bind(wallet_name)
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "select txout".to_string(),
+            source: e,
+        })?;
 
     for row in rows {
         let txid: String = row.get("txid");
@@ -380,7 +536,11 @@ pub async fn tx_graph_changeset_from_sqlite(
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
-    .await?;
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "select anchor tx".to_string(),
+        source: e,
+    })?;
 
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
@@ -405,7 +565,7 @@ pub async fn tx_graph_changeset_from_sqlite(
 
 /// Insert transactions, txouts, and anchors.
 #[tracing::instrument(skip_all)]
-pub async fn tx_graph_changeset_persist_to_sqlite(
+pub(crate) async fn tx_graph_changeset_persist_to_sqlite(
     db_tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     changeset: &tx_graph::ChangeSet<ConfirmationBlockTime>,
@@ -420,22 +580,36 @@ pub async fn tx_graph_changeset_persist_to_sqlite(
         .bind(tx.compute_txid().to_string())
         .bind(consensus::serialize(tx.as_ref()))
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert tx".to_string(),
+            source: e,
+        })?;
     }
 
     for (&txid, &last_seen) in &changeset.last_seen {
         // Upsert a stub row when the full tx is not stored yet; a bare UPDATE
         // would affect 0 rows and silently drop the timestamp. whole_tx stays
-        // NULL until a changeset carrying the full tx fills it in.
+        // NULL until a changeset carrying the full tx fills it in. The
+        // conflict update never moves the timestamp backwards: bdk_chain's own
+        // Merge only ever increases last_seen, and a stale or replayed
+        // changeset must not regress the stored value (the same guarantee
+        // update_last_revealed enforces for derivation state).
         sqlx::query(
             "INSERT INTO tx (wallet_name, txid, last_seen) VALUES ($1, $2, $3)
-             ON CONFLICT (wallet_name, txid) DO UPDATE SET last_seen = $3",
+             ON CONFLICT (wallet_name, txid) DO UPDATE SET
+                 last_seen = CASE WHEN tx.last_seen IS NULL OR $3 > tx.last_seen
+                                  THEN $3 ELSE tx.last_seen END",
         )
         .bind(wallet_name)
         .bind(txid.to_string())
         .bind(crate::checked_conv::<_, i64>(last_seen, "tx.last_seen")?)
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "update tx".to_string(),
+            source: e,
+        })?;
     }
 
     for (op, txo) in &changeset.txouts {
@@ -452,7 +626,11 @@ pub async fn tx_graph_changeset_persist_to_sqlite(
         )?)
         .bind(txo.script_pubkey.as_bytes())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert txout".to_string(),
+            source: e,
+        })?;
     }
 
     for (anchor, txid) in &changeset.anchors {
@@ -467,7 +645,11 @@ pub async fn tx_graph_changeset_persist_to_sqlite(
         .bind(anchor)
         .bind(txid.to_string())
         .execute(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "insert anchor tx".to_string(),
+            source: e,
+        })?;
     }
 
     Ok(())
@@ -475,7 +657,7 @@ pub async fn tx_graph_changeset_persist_to_sqlite(
 
 /// Select blocks.
 #[tracing::instrument(skip_all)]
-pub async fn local_chain_changeset_from_sqlite(
+pub(crate) async fn local_chain_changeset_from_sqlite(
     db_tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
 ) -> Result<local_chain::ChangeSet, BdkSqlxError> {
@@ -485,7 +667,11 @@ pub async fn local_chain_changeset_from_sqlite(
     let rows = sqlx::query("SELECT hash, height FROM block WHERE wallet_name = $1")
         .bind(wallet_name)
         .fetch_all(&mut **db_tx)
-        .await?;
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "select block".to_string(),
+            source: e,
+        })?;
 
     for row in rows {
         let hash: String = row.get("hash");
@@ -502,12 +688,15 @@ pub async fn local_chain_changeset_from_sqlite(
 
 /// Insert blocks.
 #[tracing::instrument(skip_all)]
-pub async fn local_chain_changeset_persist_to_sqlite(
+pub(crate) async fn local_chain_changeset_persist_to_sqlite(
     db_tx: &mut Transaction<'_, Sqlite>,
     wallet_name: &str,
     changeset: &local_chain::ChangeSet,
 ) -> Result<(), BdkSqlxError> {
     trace!("local chain changeset to sqlite");
+    if changeset.blocks.is_empty() {
+        return Ok(());
+    }
     // The block table keys rows by (wallet_name, hash), so a changeset mapping
     // one hash to several heights cannot be represented: persisting it would
     // silently collapse to a single row and lose checkpoints. Reject it loudly
@@ -525,6 +714,12 @@ pub async fn local_chain_changeset_persist_to_sqlite(
             seen.insert(hash, height);
         }
     }
+    // Concurrent writers persisting different hashes at the same height need
+    // no explicit serialization here (unlike postgres, which takes an advisory
+    // lock): sqlite admits only one writer at a time, so the second writer's
+    // DELETE blocks on the database write lock until the first commits, then
+    // sees and replaces its row -- last-writer-wins, as if the writes had been
+    // issued sequentially.
     for (&height, &hash) in &changeset.blocks {
         match hash {
             Some(hash) => {
@@ -538,7 +733,11 @@ pub async fn local_chain_changeset_persist_to_sqlite(
                 .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                 .bind(hash.to_string())
                 .execute(&mut **db_tx)
-                .await?;
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "delete stale block".to_string(),
+                    source: e,
+                })?;
                 sqlx::query(
                     "INSERT INTO block (wallet_name, hash, height) VALUES ($1, $2, $3)
                      ON CONFLICT (wallet_name, hash) DO UPDATE SET height = $3",
@@ -547,14 +746,22 @@ pub async fn local_chain_changeset_persist_to_sqlite(
                 .bind(hash.to_string())
                 .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                 .execute(&mut **db_tx)
-                .await?;
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "insert block".to_string(),
+                    source: e,
+                })?;
             }
             None => {
                 sqlx::query("DELETE FROM block WHERE wallet_name = $1 AND height = $2")
                     .bind(wallet_name)
                     .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                     .execute(&mut **db_tx)
-                    .await?;
+                    .await
+                    .map_err(|e| BdkSqlxError::QueryError {
+                        table: "delete block".to_string(),
+                        source: e,
+                    })?;
             }
         }
     }

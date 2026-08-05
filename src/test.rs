@@ -31,9 +31,9 @@ use test_utils::{
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use crate::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
+use crate::{BdkSqlxError, FutureResult, PgStoreBuilder, SqliteStoreBuilder, Store};
 
-pub fn get_test_minisicript_with_change_desc() -> (&'static str, &'static str) {
+fn get_test_miniscript_with_change_desc() -> (&'static str, &'static str) {
     ("wsh(andor(multi(2,[a0d3c79c/48'/1'/79'/2']tpubDEsGdqFaKUVnVNZZw8AixJ8C3yD8o6nN7hsdLfbtVRDTk3PNrQ2pcWNWNbxhdcNSgQP25pUpgRQ7qiVtN3YvSzACKizrvzSwH9SQ2Bjbbwt/0/*,[ea2484f9/48'/1'/79'/2']tpubDFjkswBXoRHKkvmHsxv4xdDqbjg1peX9zJytLeSLbXuwVgYhXgbABzC2r5MAWxqWoaUr7hWGW5TPjA9sNvxa3mX6DrNBdynDsEvwDoXGFpm/0/*,[93f245d7/48'/1'/79'/2']tpubDEVnR72gRgTsqaPFMacV6fCfaSEe56gcDomuGhk9MFeUdEi18riJCokgsZr2x1KKGRM59TJ4AQ6FuNun3khh95ceoH2ytN13nVD7yDLP5LJ/0/*),or_i(and_v(v:pkh([61cdf766/48'/1'/79'/2']tpubDEXETCw2WurhazfW5gW1z4njP6yLXDQmCGfjWGP5k3BuTQ5iZqovMr1zz1zWPhDMRn11hXGpZHodus1LysXnwREsD1ig96M24JhQCpPPpf6/0/*),after(1753228800)),thresh(2,pk([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/0/*),s:pk([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/0/*),s:pk([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/0/*),snl:after(1739836800))),and_v(v:thresh(2,pkh([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/2/*),a:pkh([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/2/*),a:pkh([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/2/*)),after(1757116800))))",
      "wsh(andor(multi(2,[a0d3c79c/48'/1'/79'/2']tpubDEsGdqFaKUVnVNZZw8AixJ8C3yD8o6nN7hsdLfbtVRDTk3PNrQ2pcWNWNbxhdcNSgQP25pUpgRQ7qiVtN3YvSzACKizrvzSwH9SQ2Bjbbwt/1/*,[ea2484f9/48'/1'/79'/2']tpubDFjkswBXoRHKkvmHsxv4xdDqbjg1peX9zJytLeSLbXuwVgYhXgbABzC2r5MAWxqWoaUr7hWGW5TPjA9sNvxa3mX6DrNBdynDsEvwDoXGFpm/1/*,[93f245d7/48'/1'/79'/2']tpubDEVnR72gRgTsqaPFMacV6fCfaSEe56gcDomuGhk9MFeUdEi18riJCokgsZr2x1KKGRM59TJ4AQ6FuNun3khh95ceoH2ytN13nVD7yDLP5LJ/1/*),or_i(and_v(v:pkh([61cdf766/48'/1'/79'/2']tpubDEXETCw2WurhazfW5gW1z4njP6yLXDQmCGfjWGP5k3BuTQ5iZqovMr1zz1zWPhDMRn11hXGpZHodus1LysXnwREsD1ig96M24JhQCpPPpf6/1/*),after(1753228800)),thresh(2,pk([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/1/*),s:pk([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/1/*),s:pk([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/1/*),snl:after(1739836800))),and_v(v:thresh(2,pkh([39bf48a9/48'/1'/0'/2']tpubDEr9rVFQbT1keErwxb6GuGy3RM6TEACSkFxBgziUvrDprYuM1Wm7wi6jb1gcaLrSgk6MSkGx84dS2kQQwJKxGRJ59rAvmuKTU7E3saHJLf5/3/*),a:pkh([9467fdb3/48'/1'/0'/2']tpubDFEjX5BY88AbWpshPwGscwgKLtcCjeVodMbmhS6D6cbz1eGNUs3546ephbVmbHpxEhbCDrezGmFBArLxBKzPEfBcBdzQuncPm8ww2xa6UUQ/3/*),a:pkh([01adf45e/48'/1'/0'/2']tpubDFPYZPeShApyWndvDUtpLSjDHGYK4tTT4BkMyTukGqbP9AXQeQhiWsbwEzyZhxgud9ZPew1FPsoLbWjfnE3veSXLeU4ViofrhVAHNXtjQWE/3/*)),after(1757116800))))")
 }
@@ -117,16 +117,37 @@ async fn pg_mgmt_unlock(mut conn: sqlx::pool::PoolConnection<Postgres>) {
         .await;
 }
 
+/// Returns the `DATABASE_TEST_URL` postgres server the tests may use, or `None`
+/// when it is not set. Postgres-backend tests skip gracefully in that case (a
+/// contributor running bare `cargo test` without a server still exercises the
+/// sqlite backend); CI always sets it, so full coverage runs there.
+fn pg_test_url() -> Option<String> {
+    static NOTICE: Once = Once::new();
+    let url = env::var("DATABASE_TEST_URL").ok();
+    if url.is_none() {
+        NOTICE.call_once(|| {
+            eprintln!(
+                "DATABASE_TEST_URL not set: skipping postgres-backend tests \
+                 (sqlite backend still runs)"
+            );
+        });
+    }
+    url
+}
+
 /// Creates a uniquely named database on the postgres server at `DATABASE_TEST_URL` and
 /// returns a pool connected to it, so every test gets an isolated database and no
-/// pre-existing tables are ever dropped.
+/// pre-existing tables are ever dropped. Returns `None` when `DATABASE_TEST_URL`
+/// is not set; callers skip the postgres half of their scenario in that case.
 ///
 /// Databases left behind by previous test runs are removed opportunistically; a database
 /// is never dropped while any session is connected to it, and creation/cleanup are
 /// serialized (in-process by `TEST_DB_LOCK`, cross-process by the advisory lock) so a
 /// parallel test cannot drop a database between its creation and first connection.
-async fn create_test_pg_pool() -> anyhow::Result<Pool<Postgres>> {
-    let admin_url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
+async fn create_test_pg_pool() -> anyhow::Result<Option<Pool<Postgres>>> {
+    let Some(admin_url) = pg_test_url() else {
+        return Ok(None);
+    };
     let admin_pool = Pool::<Postgres>::connect(&admin_url).await?;
 
     let db_name = format!(
@@ -163,7 +184,7 @@ async fn create_test_pg_pool() -> anyhow::Result<Pool<Postgres>> {
             .min_connections(1)
             .connect_with(opts)
             .await?;
-        anyhow::Ok(pool)
+        anyhow::Ok(Some(pool))
     }
     .await;
 
@@ -447,7 +468,9 @@ async fn mismatched_network_errors_on_load() -> anyhow::Result<()> {
         &Secp256k1::new(),
     )?;
 
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     let mut store = PgStoreBuilder::new(wallet_name.clone())
         .network(NETWORK)
         .migrate(true)
@@ -551,14 +574,15 @@ async fn tracing_output_contains_no_descriptor_material() -> anyhow::Result<()> 
 async fn create_test_stores(wallet_name: String) -> anyhow::Result<Vec<TestStore>> {
     let mut stores: Vec<TestStore> = Vec::new();
 
-    let pool = create_test_pg_pool().await?;
-    let postgres_store = PgStoreBuilder::new(wallet_name.clone())
-        .network(NETWORK)
-        .migrate(true)
-        .pool(pool)
-        .build()
-        .await?;
-    stores.push(TestStore::Postgres(postgres_store));
+    if let Some(pool) = create_test_pg_pool().await? {
+        let postgres_store = PgStoreBuilder::new(wallet_name.clone())
+            .network(NETWORK)
+            .migrate(true)
+            .pool(pool)
+            .build()
+            .await?;
+        stores.push(TestStore::Postgres(postgres_store));
+    }
 
     // Setup sqlite in-memory database. `new_with_url(None, ..)` configures the
     // single-connection pool a shared in-memory database requires.
@@ -769,7 +793,7 @@ async fn test_three_wallets_list_transactions() -> anyhow::Result<()> {
         TestCase::new(get_test_tr_single_sig_xprv_and_change_desc(), 20_000, 11_000, 2000).await,
         TestCase::new(("wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/0/*)#j8mkwdgr",
                        "wpkh([bdb9a801/84'/1'/0']tpubDCopxf4CiXF9dicdGrXgZV9f8j3pYbWBVfF8WxjaFHtic4DZsgp1tQ58hZdsSu6M7FFzUyAh9rMn7RZASUkPgZCMdByYKXvVtigzGi8VJs6/1/*)#rn7hnccm"), 12_000, 30_000, 1500).await,
-        TestCase::new(get_test_minisicript_with_change_desc(), 44_444, 20_000, 5000).await
+        TestCase::new(get_test_miniscript_with_change_desc(), 44_444, 20_000, 5000).await
     ].into_iter().flatten().collect::<Vec<_>>();
 
     let mut saved_tx_ids = Vec::<Txid>::new();
@@ -1793,12 +1817,11 @@ async fn failed_persist_rolls_back_everything() -> anyhow::Result<()> {
             .insert((anchor_at(99, block_hash(9), 1), txid_a));
 
         let result = TestStore::persist(&mut store, &cs).await;
-        match &store {
-            TestStore::Postgres(_) => {
-                assert_matches!(result, Err(BdkSqlxError::QueryError { .. }))
-            }
-            TestStore::Sqlite(_) => assert_matches!(result, Err(BdkSqlxError::Sqlx(_))),
-        }
+        assert_matches!(
+            result,
+            Err(BdkSqlxError::QueryError { .. }),
+            "both backends wrap statement failures in QueryError"
+        );
 
         let loaded = TestStore::initialize(&mut store).await?;
         assert!(
@@ -2018,7 +2041,9 @@ async fn wallets_sharing_a_pool_are_isolated() -> anyhow::Result<()> {
     cs_b.tx_graph.txs.insert(Arc::new(tx_b));
 
     // postgres: two builders over one pool
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     let pg_a = PgStoreBuilder::new("pg_wallet_a".into())
         .network(Regtest)
         .migrate(true)
@@ -2147,6 +2172,73 @@ async fn concurrent_persists_both_land() -> anyhow::Result<()> {
             .iter()
             .any(|tx| tx.compute_txid() == txid_b));
         assert_eq!(loaded.tx_graph.last_seen.get(&txid_b), Some(&123));
+    }
+    Ok(())
+}
+
+/// Regression test: two writers persisting different hashes for the same
+/// (previously unoccupied) height raced the block table's two unique indexes.
+/// The loser's DELETE could not see the winner's uncommitted row, and its
+/// INSERT then violated idx_block_wallet_height -- an index the upsert's
+/// (wallet_name, hash) conflict target does not cover -- aborting the loser's
+/// whole changeset with a raw 23505. Block writes are now serialized per
+/// wallet (a transaction-scoped advisory lock on postgres; sqlite's
+/// single-writer lock), so both writes land and the loser cleanly replaces
+/// the winner's row, exactly as if the writes had been issued sequentially.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_block_writes_at_same_height_both_land() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "concurrent_block_writes_at_same_height_both_land".to_string();
+    for store in create_test_stores(wallet_name.clone()).await? {
+        for round in 0..10u8 {
+            let height = 100 + u32::from(round);
+            // distinct hashes everywhere: reusing a hash at two heights would
+            // trip the DuplicateBlockHash guard instead of exercising the race
+            let hash_a = block_hash(round * 2 + 1);
+            let hash_b = block_hash(round * 2 + 2);
+
+            let (s1, s2) = match &store {
+                TestStore::Postgres(store) => (
+                    TestStore::Postgres(store.clone()),
+                    TestStore::Postgres(store.clone()),
+                ),
+                TestStore::Sqlite(store) => (
+                    TestStore::Sqlite(store.clone()),
+                    TestStore::Sqlite(store.clone()),
+                ),
+            };
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+            let mut cs_a = ChangeSet::default();
+            cs_a.local_chain.blocks.insert(height, Some(hash_a));
+            let mut cs_b = ChangeSet::default();
+            cs_b.local_chain.blocks.insert(height, Some(hash_b));
+
+            let (mut s1, mut s2) = (s1, s2);
+            let b1 = barrier.clone();
+            let h1 = tokio::spawn(async move {
+                b1.wait().await;
+                TestStore::persist(&mut s1, &cs_a).await
+            });
+            let h2 = tokio::spawn(async move {
+                barrier.wait().await;
+                TestStore::persist(&mut s2, &cs_b).await
+            });
+            h1.await??;
+            h2.await??;
+
+            // both writes landed; exactly one row per height survives
+            assert_eq!(
+                table_count(&store, "block", &wallet_name).await?,
+                i64::from(round) + 1,
+                "each raced height must hold exactly one block row"
+            );
+        }
+
+        let mut store = store;
+        let loaded = TestStore::initialize(&mut store).await?;
+        assert_eq!(loaded.local_chain.blocks.len(), 10);
     }
     Ok(())
 }
@@ -2358,7 +2450,9 @@ async fn unmigrated_store_errors() -> anyhow::Result<()> {
     initialize();
 
     // postgres wraps statement failures in QueryError
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     let store = PgStoreBuilder::new("unmigrated".into())
         .network(Regtest)
         .migrate(false)
@@ -2380,16 +2474,16 @@ async fn unmigrated_store_errors() -> anyhow::Result<()> {
         "postgres write on unmigrated schema must error"
     );
 
-    // sqlite propagates the raw sqlx error
+    // sqlite wraps statement failures in QueryError, same as postgres
     let store = Store::<Sqlite>::new_with_url(None, "unmigrated".into(), NETWORK, false).await?;
     assert_matches!(
         store.read().await,
-        Err(BdkSqlxError::Sqlx(_)),
+        Err(BdkSqlxError::QueryError { .. }),
         "sqlite read on unmigrated schema must error"
     );
     assert_matches!(
         store.write(&cs).await,
-        Err(BdkSqlxError::Sqlx(_)),
+        Err(BdkSqlxError::QueryError { .. }),
         "sqlite write on unmigrated schema must error"
     );
     Ok(())
@@ -2434,7 +2528,9 @@ async fn sqlite_file_backed_store_persists_across_connections() -> anyhow::Resul
 async fn postgres_migrate_is_idempotent() -> anyhow::Result<()> {
     initialize();
 
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     let store = PgStoreBuilder::new("migrate_twice".into())
         .network(Regtest)
         .migrate(true)
@@ -2446,12 +2542,63 @@ async fn postgres_migrate_is_idempotent() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Running migrations twice must be a no-op the second time.
+#[tokio::test]
+async fn sqlite_migrate_is_idempotent() -> anyhow::Result<()> {
+    initialize();
+
+    let store =
+        Store::<Sqlite>::new_with_url(None, "sqlite_migrate_twice".into(), NETWORK, true).await?;
+    store.migrate().await?;
+    store.migrate().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_builder_requires_network_and_pool() {
+    initialize();
+
+    // neither network nor pool set: network is validated first
+    assert_matches!(
+        SqliteStoreBuilder::new("w".into()).build().await,
+        Err(BdkSqlxError::MissingNetwork)
+    );
+
+    // network set but no pool
+    assert_matches!(
+        SqliteStoreBuilder::new("w".into())
+            .network(Regtest)
+            .build()
+            .await,
+        Err(BdkSqlxError::MissingPool)
+    );
+}
+
+/// The sqlite builder's URL path must produce a working store end to end;
+/// `None` builds the single-connection in-memory store.
+#[tokio::test]
+async fn sqlite_build_with_url_creates_working_store() -> anyhow::Result<()> {
+    initialize();
+
+    let store = SqliteStoreBuilder::new("sqlite_with_url".into())
+        .network(Regtest)
+        .migrate(true)
+        .build_with_url(None)
+        .await?;
+    assert!(store.read().await?.is_empty());
+    store.write(&populated_changeset()).await?;
+    assert_populated(&store.read().await?, &populated_changeset());
+    Ok(())
+}
+
 /// The builder's URL path must produce a working store end to end.
 #[tokio::test]
 async fn pg_build_with_url_creates_working_store() -> anyhow::Result<()> {
     initialize();
 
-    let admin_url = env::var("DATABASE_TEST_URL").expect("DATABASE_TEST_URL must be set for tests");
+    let Some(admin_url) = pg_test_url() else {
+        return Ok(());
+    };
     let admin_pool = Pool::<Postgres>::connect(&admin_url).await?;
     let db_name = format!(
         "bdk_sqlx_test_{}_{}",
@@ -2533,6 +2680,52 @@ async fn bug_last_seen_without_tx_row_is_dropped() -> anyhow::Result<()> {
             loaded.tx_graph.last_seen.get(&txid),
             Some(&1_700_000_000),
             "last_seen must survive even when the full tx was never persisted"
+        );
+    }
+    Ok(())
+}
+
+/// Regression test: the `tx.last_seen` upsert overwrote unconditionally, so a
+/// stale or replayed changeset moved the timestamp BACKWARDS, contradicting
+/// bdk_chain's own `Merge` (last_seen only ever increases). The upsert now
+/// keeps the maximum, matching the monotonic `last_revealed` update.
+#[tokio::test]
+async fn last_seen_never_regresses() -> anyhow::Result<()> {
+    initialize();
+
+    let txid = sample_tx(0, 1_000).compute_txid();
+    let wallet_name = "last_seen_never_regresses".to_string();
+    for mut store in create_test_stores(wallet_name).await? {
+        let mut cs = ChangeSet::default();
+        cs.tx_graph.txs.insert(Arc::new(sample_tx(0, 1_000)));
+        cs.tx_graph.last_seen.insert(txid, 200);
+        TestStore::persist(&mut store, &cs).await?;
+
+        // a stale/replayed changeset must not move the stored value backwards
+        let mut stale = ChangeSet::default();
+        stale.tx_graph.last_seen.insert(txid, 100);
+        TestStore::persist(&mut store, &stale).await?;
+        assert_eq!(
+            TestStore::initialize(&mut store)
+                .await?
+                .tx_graph
+                .last_seen
+                .get(&txid),
+            Some(&200),
+            "last_seen must never move backwards"
+        );
+
+        // a newer changeset still advances it
+        let mut fresh = ChangeSet::default();
+        fresh.tx_graph.last_seen.insert(txid, 300);
+        TestStore::persist(&mut store, &fresh).await?;
+        assert_eq!(
+            TestStore::initialize(&mut store)
+                .await?
+                .tx_graph
+                .last_seen
+                .get(&txid),
+            Some(&300)
         );
     }
     Ok(())
@@ -2631,7 +2824,9 @@ async fn bug_same_hash_at_multiple_heights_collapses() -> anyhow::Result<()> {
 async fn bug_postgres_write_accepts_foreign_network() -> anyhow::Result<()> {
     initialize();
 
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     let store = PgStoreBuilder::new("bug_foreign_network".into())
         .network(Regtest)
         .migrate(true)
@@ -2760,7 +2955,9 @@ async fn bug_last_revealed_regresses_causing_address_reuse() -> anyhow::Result<(
 async fn bug_postgres_read_tx_is_not_snapshot_consistent() -> anyhow::Result<()> {
     initialize();
 
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     let _store = PgStoreBuilder::new("isolation_demo".into())
         .network(Regtest)
         .migrate(true)
@@ -2859,7 +3056,9 @@ async fn migration_04_preserves_data_and_drops_default() -> anyhow::Result<()> {
     std::fs::remove_file(&path)?;
 
     // postgres: same upgrade path
-    let pool = create_test_pg_pool().await?;
+    let Some(pool) = create_test_pg_pool().await? else {
+        return Ok(());
+    };
     for file in [
         "01_bdk_wallet.sql",
         "02_anchor_tx_on_delete_cascade.sql",

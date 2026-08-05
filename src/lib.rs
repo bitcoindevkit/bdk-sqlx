@@ -161,6 +161,14 @@ pub struct PgStoreBuilder {
     network: Option<Network>,
 }
 
+/// Build a new instance of the SqliteStoreBuilder
+pub struct SqliteStoreBuilder {
+    wallet_name: String,
+    pool: Option<Pool<sqlx::Sqlite>>,
+    migrate: bool,
+    network: Option<Network>,
+}
+
 type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
 
 /// Converts an integer crossing the database boundary, erroring instead of wrapping
