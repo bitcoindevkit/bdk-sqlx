@@ -22,6 +22,7 @@ use bdk_wallet::{
 };
 use sqlx::{
     postgres::{PgPool, PgRow, Postgres},
+    sqlx_macros::migrate,
     Pool, Row, Transaction,
 };
 use tracing::{trace, warn};
@@ -200,126 +201,16 @@ impl PgStoreBuilder {
 }
 
 impl Store<Postgres> {
-    /// Runs Migrations for a [`Store`] without an existing pg connection.
+    /// Runs the versioned migrations in `migrations/postgres` for this [`Store`].
+    ///
+    /// Databases created by earlier releases (which created the schema without
+    /// migration bookkeeping) are adopted transparently: migration 01 only uses
+    /// `CREATE ... IF NOT EXISTS`, and migration 02 upgrades pre-existing
+    /// `anchor_tx` constraints in place.
     #[tracing::instrument(skip_all)]
     pub async fn migrate(&self) -> Result<()> {
         trace!("migrating bdk sqlx");
-
-        let mut tx = self.pool.begin().await?;
-
-        // Create the schema first
-        let create_schema_query = r#"CREATE SCHEMA IF NOT EXISTS "bdk_wallet""#;
-        sqlx::query(create_schema_query)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| BdkSqlxError::QueryError {
-                table: "create schema bdk_wallet".to_string(),
-                source: e,
-            })?;
-
-        // Create the tables one by one
-        let queries = [
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."version" (
-            version INTEGER PRIMARY KEY
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."network" (
-            wallet_name TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."keychain" (
-            wallet_name TEXT NOT NULL,
-            keychainkind TEXT NOT NULL,
-            descriptor TEXT NOT NULL,
-            descriptor_id BYTEA NOT NULL,
-            last_revealed INTEGER DEFAULT 0,
-            PRIMARY KEY (wallet_name, keychainkind)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."block" (
-            wallet_name TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            height INTEGER NOT NULL,
-            PRIMARY KEY (wallet_name, hash)
-        )"#,
-            r#"CREATE INDEX IF NOT EXISTS idx_block_height ON "bdk_wallet"."block" (height)"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."tx" (
-            wallet_name TEXT NOT NULL,
-            txid TEXT NOT NULL,
-            whole_tx BYTEA,
-            last_seen BIGINT,
-            PRIMARY KEY (wallet_name, txid)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."txout" (
-            wallet_name TEXT NOT NULL,
-            txid TEXT NOT NULL,
-            vout INTEGER NOT NULL,
-            value BIGINT NOT NULL,
-            script BYTEA NOT NULL,
-            PRIMARY KEY (wallet_name, txid, vout)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."anchor_tx" (
-            wallet_name TEXT NOT NULL,
-            block_hash TEXT NOT NULL,
-            anchor JSONB NOT NULL,
-            txid TEXT NOT NULL,
-            PRIMARY KEY (wallet_name, block_hash, txid),
-            FOREIGN KEY (wallet_name, block_hash) REFERENCES "bdk_wallet"."block"(wallet_name, hash) ON DELETE CASCADE,
-            FOREIGN KEY (wallet_name, txid) REFERENCES "bdk_wallet"."tx"(wallet_name, txid) ON DELETE CASCADE
-        )"#,
-            r#"CREATE INDEX IF NOT EXISTS idx_anchor_tx_txid ON "bdk_wallet"."anchor_tx" (txid)"#,
-            // Databases created before the FK clauses above included ON DELETE CASCADE
-            // reject reorg-driven block deletion while anchor_tx rows still reference the
-            // block, wedging all further persistence. Recreate such constraints in place.
-            r#"DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM pg_constraint c
-                JOIN pg_class t ON t.oid = c.conrelid
-                JOIN pg_namespace n ON n.oid = t.relnamespace
-                WHERE n.nspname = 'bdk_wallet' AND t.relname = 'anchor_tx'
-                  AND c.contype = 'f' AND c.confdeltype <> 'c'
-            ) THEN
-                ALTER TABLE "bdk_wallet"."anchor_tx"
-                    DROP CONSTRAINT IF EXISTS anchor_tx_wallet_name_block_hash_fkey,
-                    DROP CONSTRAINT IF EXISTS anchor_tx_wallet_name_txid_fkey;
-                ALTER TABLE "bdk_wallet"."anchor_tx"
-                    ADD CONSTRAINT anchor_tx_wallet_name_block_hash_fkey
-                        FOREIGN KEY (wallet_name, block_hash)
-                        REFERENCES "bdk_wallet"."block"(wallet_name, hash) ON DELETE CASCADE,
-                    ADD CONSTRAINT anchor_tx_wallet_name_txid_fkey
-                        FOREIGN KEY (wallet_name, txid)
-                        REFERENCES "bdk_wallet"."tx"(wallet_name, txid) ON DELETE CASCADE;
-            END IF;
-        END $$"#,
-        ];
-
-        // Execute each query separately
-        for query in &queries {
-            sqlx::query(query)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| BdkSqlxError::QueryError {
-                    table: query.to_string(),
-                    source: e,
-                })?;
-        }
-
-        // At the end of migration, insert the current version
-        // After all tables are created but before tx.commit()
-        sqlx::query(
-            r#"INSERT INTO "bdk_wallet"."version" (version) 
-               VALUES ($1) 
-               ON CONFLICT (version) DO NOTHING"#,
-        )
-        .bind(1) // Current schema version
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| BdkSqlxError::QueryError {
-            table: "insert version".to_string(),
-            source: e,
-        })?;
-
-        tx.commit().await?;
-
+        migrate!("./migrations/postgres").run(&self.pool).await?;
         Ok(())
     }
 }
