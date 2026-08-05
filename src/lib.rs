@@ -86,6 +86,14 @@ pub enum BdkSqlxError {
     /// Config error
     #[error("Cant get network because its not set")]
     GetNetworkFailure,
+    /// integer value outside the range representable for its destination
+    #[error("integer value out of range for {context}: {value}")]
+    IntOutOfRange {
+        /// column or field the value belongs to
+        context: &'static str,
+        /// offending value
+        value: i128,
+    },
     /// Query execution error
     #[error("Failed to execute query on {table}: {source}")]
     QueryError {
@@ -112,3 +120,16 @@ pub struct PgStoreBuilder {
 }
 
 type FutureResult<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
+
+/// Converts an integer crossing the database boundary, erroring instead of wrapping
+/// when the value does not fit the destination type (e.g. a negative amount or height).
+pub(crate) fn checked_conv<T, U>(value: T, context: &'static str) -> Result<U, BdkSqlxError>
+where
+    T: Copy + Into<i128>,
+    U: TryFrom<T>,
+{
+    U::try_from(value).map_err(|_| BdkSqlxError::IntOutOfRange {
+        context,
+        value: value.into(),
+    })
+}

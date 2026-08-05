@@ -150,6 +150,114 @@ impl AsyncWalletPersister for TestStore {
     }
 }
 
+async fn corrupt_ranges_postgres(store: &Store<Postgres>, wallet_name: &str) -> anyhow::Result<()> {
+    let pool = store.pool.clone();
+
+    // a negative sat value must not wrap into astronomical amounts
+    sqlx::query(r#"UPDATE "bdk_wallet"."txout" SET value=-1 WHERE wallet_name=$1"#)
+        .bind(wallet_name)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query(r#"UPDATE "bdk_wallet"."txout" SET value=1 WHERE wallet_name=$1"#)
+        .bind(wallet_name)
+        .execute(&pool)
+        .await?;
+
+    // a negative block height must not wrap into a huge height
+    sqlx::query(
+        r#"UPDATE "bdk_wallet"."block" SET height=-1 WHERE wallet_name=$1 AND height=2000"#,
+    )
+    .bind(wallet_name)
+    .execute(&pool)
+    .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query(
+        r#"UPDATE "bdk_wallet"."block" SET height=2000 WHERE wallet_name=$1 AND height=-1"#,
+    )
+    .bind(wallet_name)
+    .execute(&pool)
+    .await?;
+
+    store.read().await?;
+    Ok(())
+}
+
+async fn corrupt_ranges_sqlite(store: &Store<Sqlite>, wallet_name: &str) -> anyhow::Result<()> {
+    let pool = store.pool.clone();
+
+    // a negative sat value must not wrap into astronomical amounts
+    sqlx::query("UPDATE txout SET value=-1 WHERE wallet_name=$1")
+        .bind(wallet_name)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query("UPDATE txout SET value=1 WHERE wallet_name=$1")
+        .bind(wallet_name)
+        .execute(&pool)
+        .await?;
+
+    // a negative block height must not wrap into a huge height
+    sqlx::query("UPDATE block SET height=-1 WHERE wallet_name=$1 AND height=2000")
+        .bind(wallet_name)
+        .execute(&pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query("UPDATE block SET height=2000 WHERE wallet_name=$1 AND height=-1")
+        .bind(wallet_name)
+        .execute(&pool)
+        .await?;
+
+    store.read().await?;
+    Ok(())
+}
+
+/// Out-of-range integers stored in the database (e.g. negative amounts or heights)
+/// must error on load instead of wrapping around to huge unsigned values.
+#[tokio::test]
+async fn out_of_range_values_error_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+
+    let stores = create_test_stores(wallet_name.clone()).await?;
+    for mut store in stores {
+        let mut wallet = Wallet::create(external_desc, internal_desc)
+            .network(NETWORK)
+            .create_wallet_async(&mut store)
+            .await?;
+        let txid = insert_fake_tx(
+            &mut wallet,
+            Amount::from_sat(20_000),
+            Amount::from_sat(10_000),
+            Amount::from_sat(1_000),
+        );
+        // add a floating txout row so the txout table is populated
+        let mut extra = ChangeSet::default();
+        extra.tx_graph.txouts.insert(
+            OutPoint { txid, vout: 0 },
+            TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: Default::default(),
+            },
+        );
+        assert!(wallet.persist_async(&mut store).await?);
+        TestStore::persist(&mut store, &extra).await?;
+
+        match &store {
+            TestStore::Postgres(store) => corrupt_ranges_postgres(store, &wallet_name).await?,
+            TestStore::Sqlite(store) => corrupt_ranges_sqlite(store, &wallet_name).await?,
+        }
+    }
+    Ok(())
+}
+
 /// Data stored for a different network than the store was configured with (or an
 /// unparseable network string) must fail the load instead of being silently accepted.
 #[tokio::test]

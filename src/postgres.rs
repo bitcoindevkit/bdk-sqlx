@@ -394,7 +394,10 @@ impl Store<Postgres> {
             let did = descriptor.descriptor_id();
             changeset.descriptor = Some(descriptor);
             if let Some(last_rev) = external_last_revealed {
-                changeset.indexer.last_revealed.insert(did, last_rev as u32);
+                changeset.indexer.last_revealed.insert(
+                    did,
+                    crate::checked_conv(last_rev, "keychain.last_revealed")?,
+                );
             }
         }
 
@@ -403,7 +406,10 @@ impl Store<Postgres> {
             let did = descriptor.descriptor_id();
             changeset.change_descriptor = Some(descriptor);
             if let Some(last_rev) = internal_last_revealed {
-                changeset.indexer.last_revealed.insert(did, last_rev as u32);
+                changeset.indexer.last_revealed.insert(
+                    did,
+                    crate::checked_conv(last_rev, "keychain.last_revealed")?,
+                );
             }
         }
 
@@ -519,7 +525,7 @@ async fn update_last_revealed(
     sqlx::query(
         r#"UPDATE "bdk_wallet"."keychain" SET last_revealed = $1 WHERE wallet_name = $2 AND descriptor_id = $3"#,
     )
-    .bind(last_revealed as i32)
+    .bind(crate::checked_conv::<_, i32>(last_revealed, "keychain.last_revealed")?)
     .bind(wallet_name)
     .bind(descriptor_id.to_byte_array())
     .execute(&mut **db_tx)
@@ -571,7 +577,9 @@ pub async fn tx_graph_changeset_from_postgres(
             changeset.txs.insert(Arc::new(tx));
         }
         if let Some(last_seen) = last_seen {
-            changeset.last_seen.insert(txid, last_seen as u64);
+            changeset
+                .last_seen
+                .insert(txid, crate::checked_conv(last_seen, "tx.last_seen")?);
         }
     }
 
@@ -597,10 +605,10 @@ pub async fn tx_graph_changeset_from_postgres(
         changeset.txouts.insert(
             OutPoint {
                 txid,
-                vout: vout as u32,
+                vout: crate::checked_conv(vout, "txout.vout")?,
             },
             TxOut {
-                value: Amount::from_sat(value as u64),
+                value: Amount::from_sat(crate::checked_conv(value, "txout.value")?),
                 script_pubkey: ScriptBuf::from(script),
             },
         );
@@ -667,7 +675,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         sqlx::query(
             r#"UPDATE "bdk_wallet"."tx" SET last_seen = $1 WHERE wallet_name = $2 AND txid = $3"#,
         )
-        .bind(last_seen as i64)
+        .bind(crate::checked_conv::<_, i64>(last_seen, "tx.last_seen")?)
         .bind(wallet_name)
         .bind(txid.to_string())
         .execute(&mut **db_tx)
@@ -685,8 +693,8 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         )
         .bind(wallet_name)
         .bind(op.txid.to_string())
-        .bind(op.vout as i32)
-        .bind(txo.value.to_sat() as i64)
+        .bind(crate::checked_conv::<_, i32>(op.vout, "txout.vout")?)
+        .bind(crate::checked_conv::<_, i64>(txo.value.to_sat(), "txout.value")?)
         .bind(txo.script_pubkey.as_bytes())
         .execute(&mut **db_tx)
         .await
@@ -741,7 +749,10 @@ pub async fn local_chain_changeset_from_postgres(
         let hash: String = row.get("hash");
         let height: i32 = row.get("height");
         let block_hash = BlockHash::from_str(&hash)?;
-        changeset.blocks.insert(height as u32, Some(block_hash));
+        changeset.blocks.insert(
+            crate::checked_conv(height, "block.height")?,
+            Some(block_hash),
+        );
     }
 
     Ok(changeset)
@@ -764,7 +775,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
                 )
                 .bind(wallet_name)
                 .bind(hash.to_string())
-                .bind(height as i32)
+                .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                 .execute(&mut **db_tx)
                 .await
                     .map_err(|e| BdkSqlxError::QueryError {
@@ -777,7 +788,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
                     r#"DELETE FROM "bdk_wallet"."block" WHERE wallet_name = $1 AND height = $2"#,
                 )
                 .bind(wallet_name)
-                .bind(height as i32)
+                .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                 .execute(&mut **db_tx)
                 .await
                 .map_err(|e| BdkSqlxError::QueryError {
