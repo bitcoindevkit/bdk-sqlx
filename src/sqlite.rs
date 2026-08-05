@@ -49,6 +49,15 @@ impl AsyncWalletPersister for Store<Sqlite> {
 
 impl Store<Sqlite> {
     /// Construct a new [`Store`] with an existing sqlite connection pool.
+    ///
+    /// # Warning
+    ///
+    /// Do not pass a pool connected to `:memory:` with more than one connection:
+    /// each sqlite connection gets its *own* private in-memory database, so a
+    /// multi-connection pool silently reads and writes different databases (and
+    /// per-connection `PRAGMA`s only apply to the connection that ran them).
+    /// Use [`Store::new_with_url`] with `None` instead, which configures a
+    /// single-connection pool correctly.
     #[tracing::instrument(skip_all)]
     pub async fn new(
         pool: Pool<Sqlite>,
