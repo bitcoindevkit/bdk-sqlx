@@ -3321,3 +3321,221 @@ async fn migration_05_drops_dead_schema() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Fault injection: every query failure must surface as QueryError carrying the
+// query's table label, on both backends
+// ---------------------------------------------------------------------------
+
+/// Drops one wallet table out from under the store, so the next statement that
+/// touches it fails. `CASCADE` (postgres) removes dependent foreign-key
+/// constraints, not other tables, so the remaining tables stay queryable.
+async fn drop_table(store: &TestStore, table: &str) -> anyhow::Result<()> {
+    match store {
+        TestStore::Postgres(store) => {
+            sqlx::query(&format!(r#"DROP TABLE "bdk_wallet"."{table}" CASCADE"#))
+                .execute(&store.pool)
+                .await?;
+        }
+        TestStore::Sqlite(store) => {
+            sqlx::query(&format!("DROP TABLE {table}"))
+                .execute(&store.pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Installs a trigger that aborts every `op` (`INSERT`/`UPDATE`/`DELETE`) on
+/// `table`, for failures that cannot be produced by dropping the table (a
+/// statement that must fail only after an earlier statement on the same table
+/// succeeded). Row-level triggers only fire for affected rows, so a DELETE
+/// matching nothing still succeeds.
+async fn install_fault_trigger(store: &TestStore, table: &str, op: &str) -> anyhow::Result<()> {
+    match store {
+        TestStore::Postgres(store) => {
+            sqlx::query(
+                r#"CREATE OR REPLACE FUNCTION "bdk_wallet".inject_fault() RETURNS trigger
+                 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fault'; END $$"#,
+            )
+            .execute(&store.pool)
+            .await?;
+            sqlx::query(&format!(
+                r#"CREATE TRIGGER fault_trigger BEFORE {op} ON "bdk_wallet"."{table}"
+                 FOR EACH ROW EXECUTE FUNCTION "bdk_wallet".inject_fault()"#
+            ))
+            .execute(&store.pool)
+            .await?;
+        }
+        TestStore::Sqlite(store) => {
+            sqlx::query(&format!(
+                "CREATE TRIGGER fault_trigger BEFORE {op} ON {table}
+                 BEGIN SELECT RAISE(ABORT, 'injected fault'); END"
+            ))
+            .execute(&store.pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[track_caller]
+fn assert_query_error(err: BdkSqlxError, want_table: &str) {
+    match err {
+        BdkSqlxError::QueryError { table, .. } => assert_eq!(
+            table, want_table,
+            "failure must carry the failing query's table label"
+        ),
+        other => panic!("expected QueryError({want_table}), got {other:?}"),
+    }
+}
+
+/// Every SELECT on the read path maps a failure to QueryError with that
+/// query's label: with one table missing, the read fails at exactly that
+/// query (earlier reads still succeed on their intact tables).
+#[tokio::test]
+async fn read_query_failures_map_to_query_error() -> anyhow::Result<()> {
+    initialize();
+
+    const CASES: [(&str, &str); 6] = [
+        ("network", "read network"),
+        ("keychain", "read keychain"),
+        ("tx", "select tx"),
+        ("txout", "select txout"),
+        ("anchor_tx", "select anchor tx"),
+        ("block", "select block"),
+    ];
+    for (table, label) in CASES {
+        let wallet_name = format!("fault_read_{table}");
+        for store in create_test_stores(wallet_name).await? {
+            drop_table(&store, table).await?;
+            let err = store.read().await.expect_err("read must fail");
+            assert_query_error(err, label);
+        }
+    }
+    Ok(())
+}
+
+/// Every INSERT/UPDATE/DELETE on the write path maps a failure to QueryError
+/// with that statement's label. Each scenario persists a changeset touching
+/// only the statement under test, against a store whose target table is gone.
+#[tokio::test]
+async fn write_query_failures_map_to_query_error() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, _) = get_test_tr_single_sig_xprv_and_change_desc();
+    let descriptor = parse_descriptor(external_desc);
+    let did = descriptor.descriptor_id();
+
+    let descriptor_cs = ChangeSet {
+        descriptor: Some(descriptor),
+        ..Default::default()
+    };
+    let network_cs = ChangeSet {
+        network: Some(Regtest),
+        ..Default::default()
+    };
+    let mut last_revealed_cs = ChangeSet::default();
+    last_revealed_cs.indexer.last_revealed.insert(did, 5);
+    let mut txs_cs = ChangeSet::default();
+    txs_cs.tx_graph.txs.insert(Arc::new(sample_tx(0, 50_000)));
+    let mut last_seen_cs = ChangeSet::default();
+    last_seen_cs
+        .tx_graph
+        .last_seen
+        .insert(sample_tx(0, 50_000).compute_txid(), 42);
+    let mut txout_cs = ChangeSet::default();
+    txout_cs.tx_graph.txouts.insert(
+        OutPoint {
+            txid: sample_tx(0, 50_000).compute_txid(),
+            vout: 0,
+        },
+        TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::new(),
+        },
+    );
+    let mut anchor_cs = ChangeSet::default();
+    anchor_cs.tx_graph.anchors.insert((
+        anchor_at(10, block_hash(2), 12_345),
+        sample_tx(0, 50_000).compute_txid(),
+    ));
+    let mut block_cs = ChangeSet::default();
+    block_cs.local_chain.blocks.insert(5, Some(block_hash(1)));
+
+    let cases: [(&str, ChangeSet, &str); 8] = [
+        ("keychain", descriptor_cs, "insert keychain"),
+        ("network", network_cs, "insert network"),
+        ("keychain", last_revealed_cs, "update keychain"),
+        ("tx", txs_cs, "insert tx"),
+        ("tx", last_seen_cs, "update tx"),
+        ("txout", txout_cs, "insert txout"),
+        ("anchor_tx", anchor_cs, "insert anchor tx"),
+        // the Some-hash branch issues its stale-row DELETE first
+        ("block", block_cs, "delete stale block"),
+    ];
+    for (table, changeset, label) in cases {
+        let wallet_name = format!("fault_write_{label}").replace(' ', "_");
+        for mut store in create_test_stores(wallet_name).await? {
+            drop_table(&store, table).await?;
+            let err = TestStore::persist(&mut store, &changeset)
+                .await
+                .expect_err("write must fail");
+            assert_query_error(err, label);
+        }
+    }
+    Ok(())
+}
+
+/// The block upsert's INSERT and the None-hash DELETE can only fail after an
+/// earlier statement on the block table succeeded, so their failures are
+/// injected with triggers instead of dropped tables.
+#[tokio::test]
+async fn block_write_failures_map_to_query_error() -> anyhow::Result<()> {
+    initialize();
+
+    // Some-hash branch: the stale-row DELETE matches nothing and succeeds,
+    // then the INSERT fires the trigger.
+    let mut insert_cs = ChangeSet::default();
+    insert_cs.local_chain.blocks.insert(5, Some(block_hash(1)));
+    for mut store in create_test_stores("fault_block_insert".to_string()).await? {
+        install_fault_trigger(&store, "block", "INSERT").await?;
+        let err = TestStore::persist(&mut store, &insert_cs)
+            .await
+            .expect_err("block insert must fail");
+        assert_query_error(err, "insert block");
+    }
+
+    // None-hash branch: a row must exist for the row-level DELETE trigger to
+    // fire, so persist the block before arming the trigger.
+    let mut delete_cs = ChangeSet::default();
+    delete_cs.local_chain.blocks.insert(5, None);
+    for mut store in create_test_stores("fault_block_delete".to_string()).await? {
+        TestStore::persist(&mut store, &insert_cs).await?;
+        install_fault_trigger(&store, "block", "DELETE").await?;
+        let err = TestStore::persist(&mut store, &delete_cs)
+            .await
+            .expect_err("block delete must fail");
+        assert_query_error(err, "delete block");
+    }
+    Ok(())
+}
+
+/// Cloning a store shares the connection pool: data persisted through the
+/// original is visible through the clone.
+#[tokio::test]
+async fn cloned_store_shares_the_pool() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "cloned_store_shares_the_pool".to_string();
+    for mut store in create_test_stores(wallet_name).await? {
+        let cs = populated_changeset();
+        TestStore::persist(&mut store, &cs).await?;
+        let loaded = match &store {
+            TestStore::Postgres(store) => store.clone().read().await?,
+            TestStore::Sqlite(store) => store.clone().read().await?,
+        };
+        assert_populated(&loaded, &cs);
+    }
+    Ok(())
+}

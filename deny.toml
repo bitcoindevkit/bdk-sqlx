@@ -1,0 +1,42 @@
+# cargo-deny configuration — enforced by the `deny` CI job.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Any RustSec advisory (vulnerability, unmaintained, unsound, notice) fails CI.
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Licenses acceptable for this project's dependency tree.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    # Mozilla CA bundle data shipped by webpki-roots (rustls dev-dependency).
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    # MIT +no-false-attribs, used by hex_lit; as permissive as MIT.
+    "MITNFA",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Duplicate crate versions bloat builds and hide supply-chain drift; surface
+# them without failing CI, since the sqlx/bitcoin trees legitimately lag.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
