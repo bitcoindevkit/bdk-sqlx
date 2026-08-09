@@ -2,6 +2,8 @@
 name = "bdk_sqlx"
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.88"
+license = "MIT"
 
 [dependencies]
 bdk_wallet = { version = "1.2.0" }

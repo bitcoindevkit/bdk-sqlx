@@ -162,7 +162,7 @@ impl crate::SqliteStoreBuilder {
     /// each sqlite connection gets its *own* private in-memory database, so a
     /// multi-connection pool silently reads and writes different databases (and
     /// per-connection `PRAGMA`s only apply to the connection that ran them).
-    /// Use [`SqliteStoreBuilder::build_with_url`] with `None` instead, which
+    /// Use [`crate::SqliteStoreBuilder::build_with_url`] with `None` instead, which
     /// configures a single-connection pool correctly.
     pub fn pool(mut self, pool: Pool<Sqlite>) -> Self {
         self.pool = Some(pool);
