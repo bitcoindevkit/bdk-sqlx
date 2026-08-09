@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS bdk_wallet.anchor_tx (
     anchor JSONB NOT NULL,
     txid TEXT NOT NULL,
     PRIMARY KEY (wallet_name, block_hash, txid),
-    FOREIGN KEY (wallet_name, block_hash) REFERENCES bdk_wallet.block(wallet_name, hash),
-    FOREIGN KEY (wallet_name, txid) REFERENCES bdk_wallet.tx(wallet_name, txid)
+    FOREIGN KEY (wallet_name, block_hash) REFERENCES bdk_wallet.block(wallet_name, hash) ON DELETE CASCADE,
+    FOREIGN KEY (wallet_name, txid) REFERENCES bdk_wallet.tx(wallet_name, txid) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_anchor_tx_txid ON bdk_wallet.anchor_tx (txid);

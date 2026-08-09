@@ -3,70 +3,31 @@
 #![warn(missing_docs)]
 
 // Standard library imports
-use std::{
-    str::FromStr,
-    sync::{Arc, OnceLock},
-};
+use std::{str::FromStr, sync::Arc};
 // Third party crates
 use bdk_chain::{
     local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
 };
 use bdk_wallet::{
     bitcoin::{
-        self,
-        consensus::{self, Decodable},
-        hashes::Hash,
-        Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
+        self, consensus, hashes::Hash, Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
     },
     chain as bdk_chain,
-    descriptor::{Descriptor, DescriptorPublicKey, ExtendedDescriptor},
+    descriptor::ExtendedDescriptor,
     AsyncWalletPersister, ChangeSet, KeychainKind,
     KeychainKind::{External, Internal},
 };
-use serde_json::json;
 use sqlx::{
-    postgres::{PgPool, PgRow, Postgres},
-    FromRow, Pool, Row, Transaction,
+    postgres::{PgPool, Postgres},
+    sqlx_macros::migrate,
+    Pool, Row, Transaction,
 };
-use tracing::{info, trace, warn};
+use tracing::trace;
 
 // First party imports
 use super::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
 
 type Result<T> = core::result::Result<T, BdkSqlxError>;
-
-/// Thread-safe storage for the network configuration that's shared across all Store instances.
-/// This ensures consistent network validation across multiple threads.
-static NETWORK: OnceLock<Network> = OnceLock::new();
-
-/// Retrieves the current global network configuration for validation operations.
-///
-/// Returns the current network configuration or an error if not initialized.
-fn get_network() -> Result<Network> {
-    NETWORK
-        .get()
-        .copied()
-        .ok_or_else(|| BdkSqlxError::GetNetworkFailure)
-}
-
-/// Sets the global network configuration to ensure consistent validation across threads.
-///
-/// Returns an error if the network is already initialized with a different network.
-fn initialize_network(network: Network) -> Result<()> {
-    match NETWORK.get() {
-        Some(current) if *current == network => {
-            warn!("initialize_network called more than once");
-            Ok(())
-        }
-        Some(current) => Err(BdkSqlxError::DuplicateInitNetwork {
-            current: *current,
-            network,
-        }),
-        None => NETWORK
-            .set(network)
-            .map_err(BdkSqlxError::SetNetworkFailure),
-    }
-}
 
 impl AsyncWalletPersister for Store<Postgres> {
     type Error = BdkSqlxError;
@@ -147,6 +108,12 @@ impl PgStoreBuilder {
     ///
     /// The network is required to build a valid [`Store`]. If not provided,
     /// the build operation will fail with a MissingNetwork error.
+    ///
+    /// The network is process-global and shared across backends: the first
+    /// store built (postgres or sqlite) fixes it for the whole process, and
+    /// later builds with a different network fail with
+    /// [`BdkSqlxError::DuplicateInitNetwork`]. Every store validates stored
+    /// and incoming data against it.
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
         self
@@ -178,7 +145,7 @@ impl PgStoreBuilder {
                     store.migrate().await?;
                 }
 
-                initialize_network(network)?;
+                crate::initialize_network(network)?;
 
                 Ok(store)
             }
@@ -190,6 +157,14 @@ impl PgStoreBuilder {
     ///
     /// This is a convenience method that creates a connection pool from the URL
     /// and then builds the [`Store`] using that pool.
+    ///
+    /// # Security
+    ///
+    /// Without an explicit `sslmode`, postgres connections default to `prefer`, which
+    /// silently falls back to plaintext if TLS negotiation fails. For any deployment
+    /// where the database is not on the same host, require TLS in the URL (e.g.
+    /// `?sslmode=require`, or `verify-full` to also authenticate the server), and
+    /// connect with a least-privilege database role.
     ///
     /// # Errors
     ///
@@ -204,102 +179,16 @@ impl PgStoreBuilder {
 }
 
 impl Store<Postgres> {
-    /// Runs Migrations for a [`Store`] without an existing pg connection.
+    /// Runs the versioned migrations in `migrations/postgres` for this [`Store`].
+    ///
+    /// Databases created by earlier releases (which created the schema without
+    /// migration bookkeeping) are adopted transparently: migration 01 only uses
+    /// `CREATE ... IF NOT EXISTS`, and migration 02 upgrades pre-existing
+    /// `anchor_tx` constraints in place.
     #[tracing::instrument(skip_all)]
     pub async fn migrate(&self) -> Result<()> {
         trace!("migrating bdk sqlx");
-
-        let mut tx = self.pool.begin().await?;
-
-        // Create the schema first
-        let create_schema_query = r#"CREATE SCHEMA IF NOT EXISTS "bdk_wallet""#;
-        sqlx::query(create_schema_query)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| BdkSqlxError::QueryError {
-                table: "create schema bdk_wallet".to_string(),
-                source: e,
-            })?;
-
-        // Create the tables one by one
-        let queries = [
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."version" (
-            version INTEGER PRIMARY KEY
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."network" (
-            wallet_name TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."keychain" (
-            wallet_name TEXT NOT NULL,
-            keychainkind TEXT NOT NULL,
-            descriptor TEXT NOT NULL,
-            descriptor_id BYTEA NOT NULL,
-            last_revealed INTEGER DEFAULT 0,
-            PRIMARY KEY (wallet_name, keychainkind)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."block" (
-            wallet_name TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            height INTEGER NOT NULL,
-            PRIMARY KEY (wallet_name, hash)
-        )"#,
-            r#"CREATE INDEX IF NOT EXISTS idx_block_height ON "bdk_wallet"."block" (height)"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."tx" (
-            wallet_name TEXT NOT NULL,
-            txid TEXT NOT NULL,
-            whole_tx BYTEA,
-            last_seen BIGINT,
-            PRIMARY KEY (wallet_name, txid)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."txout" (
-            wallet_name TEXT NOT NULL,
-            txid TEXT NOT NULL,
-            vout INTEGER NOT NULL,
-            value BIGINT NOT NULL,
-            script BYTEA NOT NULL,
-            PRIMARY KEY (wallet_name, txid, vout)
-        )"#,
-            r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."anchor_tx" (
-            wallet_name TEXT NOT NULL,
-            block_hash TEXT NOT NULL,
-            anchor JSONB NOT NULL,
-            txid TEXT NOT NULL,
-            PRIMARY KEY (wallet_name, block_hash, txid),
-            FOREIGN KEY (wallet_name, block_hash) REFERENCES "bdk_wallet"."block"(wallet_name, hash),
-            FOREIGN KEY (wallet_name, txid) REFERENCES "bdk_wallet"."tx"(wallet_name, txid)
-        )"#,
-            r#"CREATE INDEX IF NOT EXISTS idx_anchor_tx_txid ON "bdk_wallet"."anchor_tx" (txid)"#,
-        ];
-
-        // Execute each query separately
-        for query in &queries {
-            sqlx::query(query)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| BdkSqlxError::QueryError {
-                    table: query.to_string(),
-                    source: e,
-                })?;
-        }
-
-        // At the end of migration, insert the current version
-        // After all tables are created but before tx.commit()
-        sqlx::query(
-            r#"INSERT INTO "bdk_wallet"."version" (version) 
-               VALUES ($1) 
-               ON CONFLICT (version) DO NOTHING"#,
-        )
-        .bind(1) // Current schema version
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| BdkSqlxError::QueryError {
-            table: "insert version".to_string(),
-            source: e,
-        })?;
-
-        tx.commit().await?;
-
+        migrate!("./migrations/postgres").run(&self.pool).await?;
         Ok(())
     }
 }
@@ -309,76 +198,70 @@ impl Store<Postgres> {
     pub(crate) async fn read(&self) -> Result<ChangeSet> {
         trace!("reading");
         let mut db_tx = self.pool.begin().await?;
-        let mut changeset = ChangeSet::default();
-        let sql = r#"SELECT n.name as network,
-        k_int.descriptor as internal_descriptor, k_int.last_revealed as internal_last_revealed,
-        k_ext.descriptor as external_descriptor, k_ext.last_revealed as external_last_revealed
-        FROM "bdk_wallet"."network" n
-        LEFT JOIN "bdk_wallet"."keychain" k_int ON n.wallet_name = k_int.wallet_name AND k_int.keychainkind = 'Internal'
-        LEFT JOIN "bdk_wallet"."keychain" k_ext ON n.wallet_name = k_ext.wallet_name AND k_ext.keychainkind = 'External'
-        WHERE n.wallet_name = $1"#;
-
-        // Fetch wallet data
-        let row = sqlx::query(sql)
-            .bind(&self.wallet_name)
-            .fetch_optional(&mut *db_tx)
+        // READ COMMITTED (the default) snapshots per statement, so a concurrent
+        // writer committing between the SELECTs below could produce a
+        // mixed-generation changeset. REPEATABLE READ gives one snapshot for
+        // the whole read.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *db_tx)
             .await
             .map_err(|e| BdkSqlxError::QueryError {
                 table: "read".to_string(),
                 source: e,
             })?;
+        let mut changeset = ChangeSet::default();
 
+        // Fetch the network row. It is optional: rows persisted by a changeset
+        // that carried no network must still be visible.
+        let row = sqlx::query(r#"SELECT name FROM "bdk_wallet"."network" WHERE wallet_name = $1"#)
+            .bind(&self.wallet_name)
+            .fetch_optional(&mut *db_tx)
+            .await
+            .map_err(|e| BdkSqlxError::QueryError {
+                table: "read network".to_string(),
+                source: e,
+            })?;
         if let Some(row) = row {
-            Self::changeset_from_row(&mut db_tx, &mut changeset, row, &self.wallet_name).await?;
+            let network: String = row.get("name");
+            changeset.network = Some(crate::parse_and_validate_network(&network)?);
         }
+
+        // Fetch keychain rows unconditionally: anchoring them on the network
+        // row (as the old join did) made descriptors persisted without a
+        // network vanish from every subsequent read while sitting in the
+        // database.
+        let rows = sqlx::query(
+            r#"SELECT keychainkind, descriptor, last_revealed FROM "bdk_wallet"."keychain" WHERE wallet_name = $1"#,
+        )
+        .bind(&self.wallet_name)
+        .fetch_all(&mut *db_tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "read keychain".to_string(),
+            source: e,
+        })?;
+        for row in rows {
+            let keychainkind: String = row.get("keychainkind");
+            let descriptor: String = row.get("descriptor");
+            let last_revealed: Option<i32> = row.get("last_revealed");
+            crate::keychain_changeset_from_parts(
+                &mut changeset,
+                &keychainkind,
+                &descriptor,
+                last_revealed,
+            )?;
+        }
+
+        changeset.tx_graph =
+            tx_graph_changeset_from_postgres(&mut db_tx, &self.wallet_name).await?;
+        changeset.local_chain =
+            local_chain_changeset_from_postgres(&mut db_tx, &self.wallet_name).await?;
+
+        // The reads happened inside one transaction for a consistent snapshot;
+        // close it out explicitly instead of relying on drop-rollback.
+        db_tx.commit().await?;
 
         Ok(changeset)
-    }
-
-    #[tracing::instrument(skip(db_tx, changeset, row))]
-    pub(crate) async fn changeset_from_row(
-        db_tx: &mut Transaction<'_, Postgres>,
-        changeset: &mut ChangeSet,
-        row: PgRow,
-        wallet_name: &str,
-    ) -> Result<()> {
-        trace!("changeset from row");
-
-        let network: String = row.get("network");
-        let internal_last_revealed: Option<i32> = row.get("internal_last_revealed");
-        let external_last_revealed: Option<i32> = row.get("external_last_revealed");
-        let internal_desc_str: Option<String> = row.get("internal_descriptor");
-        let external_desc_str: Option<String> = row.get("external_descriptor");
-
-        changeset.network =
-            Some(
-                Network::from_str(&network).map_err(|got| BdkSqlxError::InvalidNetwork {
-                    expected: get_network().unwrap().to_string(),
-                    got: got.to_string(),
-                })?,
-            );
-
-        if let Some(desc_str) = external_desc_str {
-            let descriptor: Descriptor<DescriptorPublicKey> = desc_str.parse()?;
-            let did = descriptor.descriptor_id();
-            changeset.descriptor = Some(descriptor);
-            if let Some(last_rev) = external_last_revealed {
-                changeset.indexer.last_revealed.insert(did, last_rev as u32);
-            }
-        }
-
-        if let Some(desc_str) = internal_desc_str {
-            let descriptor: Descriptor<DescriptorPublicKey> = desc_str.parse()?;
-            let did = descriptor.descriptor_id();
-            changeset.change_descriptor = Some(descriptor);
-            if let Some(last_rev) = internal_last_revealed {
-                changeset.indexer.last_revealed.insert(did, last_rev as u32);
-            }
-        }
-
-        changeset.tx_graph = tx_graph_changeset_from_postgres(db_tx, wallet_name).await?;
-        changeset.local_chain = local_chain_changeset_from_postgres(db_tx, wallet_name).await?;
-        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -400,6 +283,10 @@ impl Store<Postgres> {
         }
 
         if let Some(network) = changeset.network {
+            // Refuse to persist data for a different network than this process
+            // was configured for; overwriting the network row would wedge all
+            // subsequent reads with InvalidNetwork.
+            crate::validate_network_matches_configured(network)?;
             insert_network(&mut tx, wallet_name, network).await?;
         }
 
@@ -421,7 +308,7 @@ impl Store<Postgres> {
 }
 
 /// Insert keychain descriptors.
-#[tracing::instrument(skip(db_tx, descriptor))]
+#[tracing::instrument(skip_all)]
 async fn insert_descriptor(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -437,8 +324,21 @@ async fn insert_descriptor(
         Internal => "Internal",
     };
 
+    // last_revealed is inserted explicitly as NULL: "no address revealed yet"
+    // must be distinguishable from "address index 0 was revealed". The
+    // historical DEFAULT 0 conflated the two and made never-revealed wallets
+    // skip index 0 on reload. The conflict update keeps the stored
+    // last_revealed only when the descriptor itself is unchanged; a different
+    // descriptor under the same (wallet_name, keychainkind) must NOT inherit
+    // the old derivation index, or the replacement wallet would silently skip
+    // those addresses on load.
     sqlx::query(
-        r#"INSERT INTO "bdk_wallet"."keychain" (wallet_name, keychainkind, descriptor, descriptor_id) VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO "bdk_wallet"."keychain" (wallet_name, keychainkind, descriptor, descriptor_id, last_revealed) VALUES ($1, $2, $3, $4, NULL)
+         ON CONFLICT (wallet_name, keychainkind) DO UPDATE SET
+             descriptor = excluded.descriptor,
+             descriptor_id = excluded.descriptor_id,
+             last_revealed = CASE WHEN keychain.descriptor_id = excluded.descriptor_id
+                                  THEN keychain.last_revealed ELSE NULL END"#,
     )
         .bind(wallet_name)
         .bind(keychain)
@@ -455,28 +355,31 @@ async fn insert_descriptor(
 }
 
 /// Insert network.
-#[tracing::instrument(skip(db_tx, network))]
+#[tracing::instrument(skip_all)]
 async fn insert_network(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     network: Network,
 ) -> Result<()> {
     trace!("insert network");
-    sqlx::query(r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2)"#)
-        .bind(wallet_name)
-        .bind(network.to_string())
-        .execute(&mut **db_tx)
-        .await
-        .map_err(|e| BdkSqlxError::QueryError {
-            table: "insert network".to_string(),
-            source: e,
-        })?;
+    sqlx::query(
+        r#"INSERT INTO "bdk_wallet"."network" (wallet_name, name) VALUES ($1, $2)
+         ON CONFLICT (wallet_name) DO UPDATE SET name = excluded.name"#,
+    )
+    .bind(wallet_name)
+    .bind(network.to_string())
+    .execute(&mut **db_tx)
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "insert network".to_string(),
+        source: e,
+    })?;
 
     Ok(())
 }
 
 /// Update keychain last revealed
-#[tracing::instrument(skip(db_tx, descriptor_id, last_revealed))]
+#[tracing::instrument(skip_all)]
 async fn update_last_revealed(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
@@ -485,10 +388,14 @@ async fn update_last_revealed(
 ) -> Result<()> {
     trace!("update last revealed");
 
-    sqlx::query(
-        r#"UPDATE "bdk_wallet"."keychain" SET last_revealed = $1 WHERE wallet_name = $2 AND descriptor_id = $3"#,
+    // Derivation state must never move backwards: a stale or replayed
+    // changeset carrying a smaller index would silently re-reveal already
+    // handed-out addresses on the next load.
+    let result = sqlx::query(
+        r#"UPDATE "bdk_wallet"."keychain" SET last_revealed = CASE WHEN last_revealed IS NULL OR $1 > last_revealed THEN $1 ELSE last_revealed END
+         WHERE wallet_name = $2 AND descriptor_id = $3"#,
     )
-    .bind(last_revealed as i32)
+    .bind(crate::checked_conv::<_, i32>(last_revealed, "keychain.last_revealed")?)
     .bind(wallet_name)
     .bind(descriptor_id.to_byte_array())
     .execute(&mut **db_tx)
@@ -498,12 +405,20 @@ async fn update_last_revealed(
             source: e,
         })?;
 
+    // Silently updating 0 rows would lose derivation state and cause address reuse.
+    if result.rows_affected() == 0 {
+        return Err(BdkSqlxError::QueryError {
+            table: "keychain".to_string(),
+            source: sqlx::Error::RowNotFound,
+        });
+    }
+
     Ok(())
 }
 
 /// Select transactions, txouts, and anchors.
 #[tracing::instrument(skip(db_tx))]
-pub async fn tx_graph_changeset_from_postgres(
+pub(crate) async fn tx_graph_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
 ) -> Result<tx_graph::ChangeSet<ConfirmationBlockTime>> {
@@ -529,12 +444,20 @@ pub async fn tx_graph_changeset_from_postgres(
         let last_seen: Option<i64> = row.get("last_seen");
 
         if let Some(tx_bytes) = whole_tx {
-            if let Ok(tx) = bitcoin::Transaction::consensus_decode(&mut tx_bytes.as_slice()) {
-                changeset.txs.insert(Arc::new(tx));
+            let tx: bitcoin::Transaction = consensus::deserialize(&tx_bytes)?;
+            let computed = tx.compute_txid();
+            if computed != txid {
+                return Err(BdkSqlxError::TxidMismatch {
+                    stored: txid,
+                    computed,
+                });
             }
+            changeset.txs.insert(Arc::new(tx));
         }
         if let Some(last_seen) = last_seen {
-            changeset.last_seen.insert(txid, last_seen as u64);
+            changeset
+                .last_seen
+                .insert(txid, crate::checked_conv(last_seen, "tx.last_seen")?);
         }
     }
 
@@ -560,34 +483,43 @@ pub async fn tx_graph_changeset_from_postgres(
         changeset.txouts.insert(
             OutPoint {
                 txid,
-                vout: vout as u32,
+                vout: crate::checked_conv(vout, "txout.vout")?,
             },
             TxOut {
-                value: Amount::from_sat(value as u64),
+                value: Amount::from_sat(crate::checked_conv(value, "txout.value")?),
                 script_pubkey: ScriptBuf::from(script),
             },
         );
     }
 
     // Fetch anchors
-    let rows =
-        sqlx::query(r#"SELECT anchor, txid FROM "bdk_wallet"."anchor_tx" WHERE wallet_name = $1"#)
-            .bind(wallet_name)
-            .fetch_all(&mut **db_tx)
-            .await
-            .map_err(|e| BdkSqlxError::QueryError {
-                table: "select anchor tx".to_string(),
-                source: e,
-            })?;
+    let rows = sqlx::query(
+        r#"SELECT anchor, txid, block_hash FROM "bdk_wallet"."anchor_tx" WHERE wallet_name = $1"#,
+    )
+    .bind(wallet_name)
+    .fetch_all(&mut **db_tx)
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "select anchor tx".to_string(),
+        source: e,
+    })?;
 
     for row in rows {
         let anchor: serde_json::Value = row.get("anchor");
         let txid: String = row.get("txid");
         let txid = Txid::from_str(&txid)?;
+        let block_hash: String = row.get("block_hash");
+        let block_hash = BlockHash::from_str(&block_hash)?;
 
-        if let Ok(anchor) = serde_json::from_value::<ConfirmationBlockTime>(anchor) {
-            changeset.anchors.insert((anchor, txid));
+        let anchor: ConfirmationBlockTime = serde_json::from_value(anchor)?;
+        let computed = anchor.anchor_block().hash;
+        if computed != block_hash {
+            return Err(BdkSqlxError::AnchorBlockHashMismatch {
+                stored: block_hash,
+                computed,
+            });
         }
+        changeset.anchors.insert((anchor, txid));
     }
 
     Ok(changeset)
@@ -595,7 +527,7 @@ pub async fn tx_graph_changeset_from_postgres(
 
 /// Insert transactions, txouts, and anchors.
 #[tracing::instrument(skip(db_tx, changeset))]
-pub async fn tx_graph_changeset_persist_to_postgres(
+pub(crate) async fn tx_graph_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     changeset: &tx_graph::ChangeSet<ConfirmationBlockTime>,
@@ -618,12 +550,22 @@ pub async fn tx_graph_changeset_persist_to_postgres(
     }
 
     for (&txid, &last_seen) in &changeset.last_seen {
+        // Upsert a stub row when the full tx is not stored yet; a bare UPDATE
+        // would affect 0 rows and silently drop the timestamp. whole_tx stays
+        // NULL until a changeset carrying the full tx fills it in. The
+        // conflict update never moves the timestamp backwards: bdk_chain's own
+        // Merge only ever increases last_seen, and a stale or replayed
+        // changeset must not regress the stored value (the same guarantee
+        // update_last_revealed enforces for derivation state).
         sqlx::query(
-            r#"UPDATE "bdk_wallet"."tx" SET last_seen = $1 WHERE wallet_name = $2 AND txid = $3"#,
+            r#"INSERT INTO "bdk_wallet"."tx" (wallet_name, txid, last_seen) VALUES ($1, $2, $3)
+             ON CONFLICT (wallet_name, txid) DO UPDATE SET
+                 last_seen = CASE WHEN tx.last_seen IS NULL OR $3 > tx.last_seen
+                                  THEN $3 ELSE tx.last_seen END"#,
         )
-        .bind(last_seen as i64)
         .bind(wallet_name)
         .bind(txid.to_string())
+        .bind(crate::checked_conv::<_, i64>(last_seen, "tx.last_seen")?)
         .execute(&mut **db_tx)
         .await
         .map_err(|e| BdkSqlxError::QueryError {
@@ -639,8 +581,8 @@ pub async fn tx_graph_changeset_persist_to_postgres(
         )
         .bind(wallet_name)
         .bind(op.txid.to_string())
-        .bind(op.vout as i32)
-        .bind(txo.value.to_sat() as i64)
+        .bind(crate::checked_conv::<_, i32>(op.vout, "txout.vout")?)
+        .bind(crate::checked_conv::<_, i64>(txo.value.to_sat(), "txout.value")?)
         .bind(txo.script_pubkey.as_bytes())
         .execute(&mut **db_tx)
         .await
@@ -674,7 +616,7 @@ pub async fn tx_graph_changeset_persist_to_postgres(
 
 /// Select blocks.
 #[tracing::instrument(skip(db_tx))]
-pub async fn local_chain_changeset_from_postgres(
+pub(crate) async fn local_chain_changeset_from_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
 ) -> Result<local_chain::ChangeSet> {
@@ -695,7 +637,10 @@ pub async fn local_chain_changeset_from_postgres(
         let hash: String = row.get("hash");
         let height: i32 = row.get("height");
         let block_hash = BlockHash::from_str(&hash)?;
-        changeset.blocks.insert(height as u32, Some(block_hash));
+        changeset.blocks.insert(
+            crate::checked_conv(height, "block.height")?,
+            Some(block_hash),
+        );
     }
 
     Ok(changeset)
@@ -703,22 +648,77 @@ pub async fn local_chain_changeset_from_postgres(
 
 /// Insert blocks.
 #[tracing::instrument(skip(db_tx, changeset))]
-pub async fn local_chain_changeset_persist_to_postgres(
+pub(crate) async fn local_chain_changeset_persist_to_postgres(
     db_tx: &mut Transaction<'_, Postgres>,
     wallet_name: &str,
     changeset: &local_chain::ChangeSet,
 ) -> Result<()> {
     trace!("local chain changeset to postgres");
+    if changeset.blocks.is_empty() {
+        return Ok(());
+    }
+    // The delete+insert below keeps exactly one row per (wallet_name, height)
+    // and must observe every committed row at that height. A concurrent writer
+    // doing the same for a different hash at the same height is invisible to
+    // the DELETE until it commits, and its INSERT then loses to the
+    // idx_block_wallet_height unique index (which the upsert's
+    // (wallet_name, hash) conflict target does not cover), aborting its whole
+    // changeset with a raw 23505. Serialize the block-table section per wallet
+    // instead: the loser waits for the winner to commit, then sees and
+    // replaces its row (last-writer-wins), exactly as if the writes had been
+    // issued sequentially. The lock is transaction-scoped, so commit or
+    // rollback releases it. sqlite needs no equivalent: its single-writer
+    // lock already serializes the same interleaving.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("bdk_sqlx_local_chain:{wallet_name}"))
+        .execute(&mut **db_tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "lock local_chain".to_string(),
+            source: e,
+        })?;
+    // The block table keys rows by (wallet_name, hash), so a changeset mapping
+    // one hash to several heights cannot be represented: persisting it would
+    // silently collapse to a single row and lose checkpoints. Reject it loudly
+    // instead. Real chains never produce such changesets.
+    let mut seen = std::collections::HashMap::new();
+    for (&height, &hash) in &changeset.blocks {
+        if let Some(hash) = hash {
+            if let Some(&first_height) = seen.get(&hash) {
+                return Err(BdkSqlxError::DuplicateBlockHash {
+                    hash,
+                    first_height,
+                    second_height: height,
+                });
+            }
+            seen.insert(hash, height);
+        }
+    }
     for (&height, &hash) in &changeset.blocks {
         match hash {
             Some(hash) => {
+                // A reorg can replace the block at this height with a different hash;
+                // remove the stale row first (its anchors cascade away) so exactly one
+                // row per (wallet_name, height) remains.
+                sqlx::query(
+                    r#"DELETE FROM "bdk_wallet"."block" WHERE wallet_name = $1 AND height = $2 AND hash != $3"#,
+                )
+                .bind(wallet_name)
+                .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
+                .bind(hash.to_string())
+                .execute(&mut **db_tx)
+                .await
+                .map_err(|e| BdkSqlxError::QueryError {
+                    table: "delete stale block".to_string(),
+                    source: e,
+                })?;
                 sqlx::query(
                     r#"INSERT INTO "bdk_wallet"."block" (wallet_name, hash, height) VALUES ($1, $2, $3)
                      ON CONFLICT (wallet_name, hash) DO UPDATE SET height = $3"#,
                 )
                 .bind(wallet_name)
                 .bind(hash.to_string())
-                .bind(height as i32)
+                .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                 .execute(&mut **db_tx)
                 .await
                     .map_err(|e| BdkSqlxError::QueryError {
@@ -731,7 +731,7 @@ pub async fn local_chain_changeset_persist_to_postgres(
                     r#"DELETE FROM "bdk_wallet"."block" WHERE wallet_name = $1 AND height = $2"#,
                 )
                 .bind(wallet_name)
-                .bind(height as i32)
+                .bind(crate::checked_conv::<_, i32>(height, "block.height")?)
                 .execute(&mut **db_tx)
                 .await
                 .map_err(|e| BdkSqlxError::QueryError {
@@ -742,32 +742,5 @@ pub async fn local_chain_changeset_persist_to_postgres(
         }
     }
 
-    Ok(())
-}
-
-/// Collects information on all the wallets in the database and dumps it to stdout.
-#[tracing::instrument]
-pub async fn easy_backup(db: Pool<Postgres>) -> Result<()> {
-    trace!("Starting easy backup");
-
-    let statement = r#"SELECT * FROM "bdk_wallet"."keychain""#;
-
-    #[derive(serde::Serialize, FromRow)]
-    struct KeychainEntry {
-        wallet_name: String,
-        keychainkind: String,
-        descriptor: String,
-        descriptor_id: Vec<u8>,
-        last_revealed: i32,
-    }
-
-    let results = sqlx::query_as::<_, KeychainEntry>(statement)
-        .fetch_all(&db)
-        .await?;
-
-    let json_array = json!(results);
-    println!("{}", serde_json::to_string_pretty(&json_array)?);
-
-    info!("Easy backup completed successfully");
     Ok(())
 }
