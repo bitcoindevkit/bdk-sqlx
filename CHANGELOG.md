@@ -4,7 +4,7 @@ All notable defects found in review and fixed are listed here. Each fix is
 guarded by an always-on regression test in the suite (`src/test.rs` and
 `tests/builder_network.rs`).
 
-## Unreleased
+## 0.1.0
 
 ### Fixed
 
