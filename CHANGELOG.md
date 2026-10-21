@@ -8,6 +8,12 @@ guarded by an always-on regression test in the suite (`src/test.rs` and
 
 ### Fixed
 
+- Stored rows are decoded with `try_get` instead of `Row::get`, and SQLite
+  integer columns are read as `i64` before range checking. Corrupt or
+  foreign-schema values (including values above `i32::MAX` in `height`, `vout`,
+  `last_revealed`, or `block_height`, and wrong SQLite storage classes) now
+  return `BdkSqlxError` instead of panicking during a wallet load. Regression
+  test: `sqlite_oversized_and_mistyped_values_error_on_load`.
 - Anchors now persist their full bdk_core identity: block height, block hash,
   and confirmation time are part of the primary key, and the stored columns are
   cross-checked against the JSON payload on load. Anchors that share a block and
