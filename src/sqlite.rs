@@ -62,11 +62,6 @@ impl Store<Sqlite> {
     /// per-connection `PRAGMA`s only apply to the connection that ran them).
     /// Use [`Store::new_with_url`] with `None` instead, which configures a
     /// single-connection pool correctly.
-    ///
-    /// The pool must not disable `PRAGMA foreign_keys` (sqlx enables it by
-    /// default): reorg handling relies on `ON DELETE CASCADE`, and with
-    /// foreign keys off a disconnected block's anchor rows are silently left
-    /// behind and reload forever.
     #[tracing::instrument(skip_all)]
     pub async fn new(
         pool: Pool<Sqlite>,
@@ -724,8 +719,9 @@ pub(crate) async fn local_chain_changeset_persist_to_sqlite(
         match hash {
             Some(hash) => {
                 // A reorg can replace the block at this height with a different hash;
-                // remove the stale row first (its anchors cascade away) so exactly one
-                // row per (wallet_name, height) remains.
+                // remove the stale row first so exactly one row per
+                // (wallet_name, height) remains. Anchors are independent rows and are
+                // retained, matching bdk_chain's monotone tx graph.
                 sqlx::query(
                     "DELETE FROM block WHERE wallet_name = $1 AND height = $2 AND hash != $3",
                 )
