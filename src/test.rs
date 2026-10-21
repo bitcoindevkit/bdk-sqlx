@@ -1435,6 +1435,54 @@ async fn two_wallets_load() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn unsupported_descriptors_error_without_panicking() {
+    // `DescriptorExt::descriptor_id()` unwraps `at_derivation_index(0)`, which
+    // panics for these valid-but-unsupported descriptor shapes.
+    let tpub = "tpubD6NzVbkrYhZ4XHndKkuB8FifXm8r5FQHwrN6oZuWCz13qb93rtgKvD4PQsqC4HP4yhV3tA2fqr2RbY5mNXfM7RxXUoeABoDtsFUq2zJq6YK";
+    for descriptor in [
+        format!("wpkh({tpub}/<0;1>/*)"),
+        format!("wpkh({tpub}/0/*')"),
+        format!("wpkh({tpub}/0'/1/*)"),
+    ] {
+        let mut changeset = ChangeSet::default();
+        assert_matches!(
+            crate::keychain_changeset_from_parts(&mut changeset, "External", &descriptor, None),
+            Err(BdkSqlxError::UnsupportedDescriptor),
+            "unsupported descriptor must not panic: {descriptor}"
+        );
+    }
+}
+
+/// A stored multipath/hardened descriptor must fail the load with a typed error
+/// instead of panicking while computing its descriptor id.
+#[tokio::test]
+async fn unsupported_stored_descriptor_errors_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "unsupported_stored_descriptor_errors_on_load".to_string();
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let mut store = Store::<Sqlite>::new_with_url(None, wallet_name.clone(), NETWORK, true).await?;
+    let mut wallet = Wallet::create(external_desc, internal_desc)
+        .network(NETWORK)
+        .create_wallet_async(&mut store)
+        .await?;
+    let _ = wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+    assert!(wallet.persist_async(&mut store).await?);
+
+    let tpub = "tpubD6NzVbkrYhZ4XHndKkuB8FifXm8r5FQHwrN6oZuWCz13qb93rtgKvD4PQsqC4HP4yhV3tA2fqr2RbY5mNXfM7RxXUoeABoDtsFUq2zJq6YK";
+    sqlx::query(
+        "UPDATE keychain SET descriptor=$2 WHERE wallet_name=$1 AND keychainkind='External'",
+    )
+    .bind(&wallet_name)
+    .bind(format!("wpkh({tpub}/<0;1>/*)"))
+    .execute(&store.pool)
+    .await?;
+
+    assert_matches!(store.read().await, Err(BdkSqlxError::UnsupportedDescriptor));
+    Ok(())
+}
+
+#[test]
 fn checked_conv_accepts_in_range_values() {
     assert_eq!(crate::checked_conv::<i32, u32>(42, "t").unwrap(), 42u32);
     assert_eq!(

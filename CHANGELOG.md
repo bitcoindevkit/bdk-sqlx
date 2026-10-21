@@ -8,6 +8,13 @@ guarded by an always-on regression test in the suite (`src/test.rs` and
 
 ### Fixed
 
+- Descriptor IDs are computed through a checked helper that rejects multipath
+  keys, hardened wildcards, and hardened derivation steps before deriving index
+  0. Stored or caller-supplied descriptors with those shapes now return
+  `BdkSqlxError::UnsupportedDescriptor` instead of panicking inside
+  `DescriptorExt::descriptor_id()`. Regression tests:
+  `unsupported_descriptors_error_without_panicking` and
+  `unsupported_stored_descriptor_errors_on_load`.
 - Stored rows are decoded with `try_get` instead of `Row::get`, and SQLite
   integer columns are read as `i64` before range checking. Corrupt or
   foreign-schema values (including values above `i32::MAX` in `height`, `vout`,

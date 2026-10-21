@@ -5,9 +5,7 @@
 // Standard library imports
 use std::{str::FromStr, sync::Arc};
 // Third party crates
-use bdk_chain::{
-    local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
-};
+use bdk_chain::{local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorId, Merge};
 use bdk_wallet::{
     bitcoin::{
         self, consensus, hashes::Hash, Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
@@ -334,7 +332,7 @@ async fn insert_descriptor(
     trace!("insert descriptor");
     let descriptor_str = descriptor.to_string();
 
-    let descriptor_id = descriptor.descriptor_id().to_byte_array();
+    let descriptor_id = crate::descriptor_id_checked(descriptor)?.to_byte_array();
     let keychain = match keychain {
         External => "External",
         Internal => "Internal",
