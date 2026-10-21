@@ -240,8 +240,8 @@ impl AsyncWalletPersister for TestStore {
 }
 
 /// A reorg that replaces the block at a height with a different hash must leave exactly
-/// one row for that height (the old row's anchors cascade away), not accumulate
-/// duplicate rows that make loads nondeterministic.
+/// one block row for that height, while retaining anchors for the disconnected
+/// block (the tx graph is monotone in BDK).
 #[tokio::test]
 async fn reorg_replaced_block_leaves_single_row() -> anyhow::Result<()> {
     initialize();
@@ -276,9 +276,9 @@ async fn reorg_replaced_block_leaves_single_row() -> anyhow::Result<()> {
 
         let cs = TestStore::initialize(&mut store).await?;
         assert_eq!(cs.local_chain.blocks.get(&2_000), Some(&Some(new_hash)));
-        // the anchor that referenced the replaced block is gone with it; the
-        // anchor on the untouched block at height 1000 survives
-        assert_eq!(cs.tx_graph.anchors.len(), 1);
+        // Both anchors survive: the old anchor still points at the disconnected
+        // block, exactly as it would in an in-memory bdk_chain::TxGraph.
+        assert_eq!(cs.tx_graph.anchors.len(), 2);
 
         // exactly one row must remain at that height
         let rows_at_height: i64 = match &store {
@@ -1231,13 +1231,14 @@ async fn reorged_out_anchored_block_can_be_deleted() -> anyhow::Result<()> {
             .await
             .expect("persisting a reorg over an anchored block must not fail");
 
-        // The disconnected block and its anchor are gone; the rest survives.
+        // The disconnected block row is gone, but its anchors are retained;
+        // BDK's tx graph is monotone and never removes anchors.
         let changeset = TestStore::initialize(&mut store).await?;
         assert!(!changeset.local_chain.blocks.contains_key(&2_000));
         assert_eq!(
             changeset.tx_graph.anchors.len(),
-            1,
-            "only the anchor on the disconnected block is dropped"
+            2,
+            "anchors on a disconnected block must be retained"
         );
         assert_eq!(changeset.tx_graph.txs.len(), 2);
 
@@ -1674,8 +1675,8 @@ async fn changesets_merge_across_persists() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A reorg that evicts an anchored block drops the anchor with it; anchoring the
-/// same tx to the replacement block must then roundtrip cleanly.
+/// A reorg that evicts an anchored block retains the old anchor, and anchoring
+/// the same tx to the replacement block adds a second anchor.
 #[tokio::test]
 async fn reanchor_after_reorg_roundtrip() -> anyhow::Result<()> {
     initialize();
@@ -1683,6 +1684,8 @@ async fn reanchor_after_reorg_roundtrip() -> anyhow::Result<()> {
     let wallet_name = "reanchor_after_reorg_roundtrip".to_string();
     for mut store in create_test_stores(wallet_name).await? {
         TestStore::persist(&mut store, &populated_changeset()).await?;
+        let txid_a = sample_tx(0, 50_000).compute_txid();
+        let old_anchor = anchor_at(10, block_hash(2), 12_345);
 
         // replace the anchored block at height 10 with a different hash
         let mut reorg = ChangeSet::default();
@@ -1690,13 +1693,14 @@ async fn reanchor_after_reorg_roundtrip() -> anyhow::Result<()> {
         TestStore::persist(&mut store, &reorg).await?;
 
         let loaded = TestStore::initialize(&mut store).await?;
-        assert!(
-            loaded.tx_graph.anchors.is_empty(),
-            "anchors of the reorged-out block must be gone"
+        assert_eq!(
+            loaded.tx_graph.anchors.len(),
+            1,
+            "the anchor for the disconnected block must be retained"
         );
+        assert!(loaded.tx_graph.anchors.contains(&(old_anchor, txid_a)));
 
         // re-anchor the same tx to the replacement block
-        let txid_a = sample_tx(0, 50_000).compute_txid();
         let mut reanchor = ChangeSet::default();
         reanchor
             .tx_graph
@@ -1705,7 +1709,8 @@ async fn reanchor_after_reorg_roundtrip() -> anyhow::Result<()> {
         TestStore::persist(&mut store, &reanchor).await?;
 
         let loaded = TestStore::initialize(&mut store).await?;
-        assert_eq!(loaded.tx_graph.anchors.len(), 1);
+        assert_eq!(loaded.tx_graph.anchors.len(), 2);
+        assert!(loaded.tx_graph.anchors.contains(&(old_anchor, txid_a)));
         assert!(loaded
             .tx_graph
             .anchors
@@ -1795,8 +1800,9 @@ async fn descriptor_persist_leaves_last_revealed_unset() -> anyhow::Result<()> {
 // Transactionality
 // ---------------------------------------------------------------------------
 
-/// A changeset that fails partway (here: an anchor referencing a block that was
-/// never persisted, which violates the FK) must roll back everything it wrote.
+/// A changeset that fails partway (here: a transaction output value that cannot
+/// be represented in the database) must roll back everything it wrote, including
+/// rows written before the failing statement.
 #[tokio::test]
 async fn failed_persist_rolls_back_everything() -> anyhow::Result<()> {
     initialize();
@@ -1811,16 +1817,24 @@ async fn failed_persist_rolls_back_everything() -> anyhow::Result<()> {
             ..Default::default()
         };
         cs.tx_graph.txs.insert(Arc::new(tx_a));
-        // no block row for this anchor -> FK violation on anchor_tx
-        cs.tx_graph
-            .anchors
-            .insert((anchor_at(99, block_hash(9), 1), txid_a));
+        // u64::MAX sats cannot be stored in the signed 64-bit value column; the
+        // failure happens after the network and tx writes in the same transaction.
+        cs.tx_graph.txouts.insert(
+            OutPoint {
+                txid: txid_a,
+                vout: 0,
+            },
+            TxOut {
+                value: Amount::from_sat(u64::MAX),
+                script_pubkey: ScriptBuf::new(),
+            },
+        );
 
         let result = TestStore::persist(&mut store, &cs).await;
         assert_matches!(
             result,
-            Err(BdkSqlxError::QueryError { .. }),
-            "both backends wrap statement failures in QueryError"
+            Err(BdkSqlxError::IntOutOfRange { .. }),
+            "the out-of-range value must fail the persist"
         );
 
         let loaded = TestStore::initialize(&mut store).await?;
@@ -1831,6 +1845,30 @@ async fn failed_persist_rolls_back_everything() -> anyhow::Result<()> {
         for table in ALL_TABLES {
             assert_eq!(table_count(&store, table, &wallet_name).await?, 0);
         }
+    }
+    Ok(())
+}
+
+/// Anchors are independent tx-graph data: an anchor may be persisted before its
+/// transaction or block is known, exactly as bdk_chain's own SQLite store allows.
+#[tokio::test]
+async fn anchor_without_block_or_tx_persists() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "anchor_without_block_or_tx_persists".to_string();
+    for mut store in create_test_stores(wallet_name).await? {
+        let txid = sample_tx(0, 1_000).compute_txid();
+        let anchor = anchor_at(123, block_hash(9), 456);
+
+        let mut cs = ChangeSet::default();
+        cs.tx_graph.anchors.insert((anchor, txid));
+        TestStore::persist(&mut store, &cs).await?;
+
+        let loaded = TestStore::initialize(&mut store).await?;
+        assert_eq!(loaded.tx_graph.anchors.len(), 1);
+        assert!(loaded.tx_graph.anchors.contains(&(anchor, txid)));
+        assert!(loaded.tx_graph.txs.is_empty());
+        assert!(loaded.local_chain.blocks.is_empty());
     }
     Ok(())
 }

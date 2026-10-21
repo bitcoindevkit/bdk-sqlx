@@ -698,8 +698,9 @@ pub(crate) async fn local_chain_changeset_persist_to_postgres(
         match hash {
             Some(hash) => {
                 // A reorg can replace the block at this height with a different hash;
-                // remove the stale row first (its anchors cascade away) so exactly one
-                // row per (wallet_name, height) remains.
+                // remove the stale row first so exactly one row per
+                // (wallet_name, height) remains. Anchors are independent rows and are
+                // retained, matching bdk_chain's monotone tx graph.
                 sqlx::query(
                     r#"DELETE FROM "bdk_wallet"."block" WHERE wallet_name = $1 AND height = $2 AND hash != $3"#,
                 )

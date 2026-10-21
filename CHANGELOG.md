@@ -8,6 +8,16 @@ guarded by an always-on regression test in the suite (`src/test.rs` and
 
 ### Fixed
 
+- Anchors are now stored independently of local-chain blocks and transaction
+  rows. `anchor_tx` no longer has foreign keys to `block` or `tx`, so a valid
+  BDK changeset may persist an anchor before its block/transaction is known,
+  and a reorg no longer cascades anchor history away. This matches
+  `bdk_chain`'s monotone `TxGraph` and its own SQLite persistence. Regression
+  tests: `anchor_without_block_or_tx_persists`,
+  `reorg_replaced_block_leaves_single_row`,
+  `reorged_out_anchored_block_can_be_deleted`, and
+  `reanchor_after_reorg_roundtrip`.
+
 - Two writers persisting different block hashes for the same previously
   unoccupied height raced the block table's two unique indexes on postgres:
   the loser's `DELETE` could not see the winner's uncommitted row, and its
