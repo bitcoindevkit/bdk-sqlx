@@ -55,6 +55,24 @@ pub enum BdkSqlxError {
         /// block hash contained in the anchor payload
         computed: BlockHash,
     },
+    /// stored anchor references a different height than the stored block_height
+    #[error("anchor block height {computed} does not match stored block_height {stored}")]
+    AnchorBlockHeightMismatch {
+        /// height stored in the block_height column
+        stored: u32,
+        /// height contained in the anchor payload
+        computed: u32,
+    },
+    /// stored anchor references a different confirmation time than the stored column
+    #[error(
+        "anchor confirmation time {computed} does not match stored confirmation_time {stored}"
+    )]
+    AnchorConfirmationTimeMismatch {
+        /// confirmation time stored in the confirmation_time column
+        stored: u64,
+        /// confirmation time contained in the anchor payload
+        computed: u64,
+    },
     /// a changeset maps the same block hash to more than one height, which the
     /// block table cannot represent (its key is the hash itself)
     #[error(
