@@ -1,0 +1,46 @@
+[package]
+name = "bdk-sqlx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bdk_sqlx = { path = ".." }
+bdk_wallet = { version = "1.2.0" }
+libfuzzer-sys = "0.4"
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+
+[[bin]]
+name = "changeset_roundtrip"
+path = "fuzz_targets/changeset_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "corrupt_rows"
+path = "fuzz_targets/corrupt_rows.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "anchor_identity"
+path = "fuzz_targets/anchor_identity.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "descriptor_validation"
+path = "fuzz_targets/descriptor_validation.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[workspace]
+members = ["."]
