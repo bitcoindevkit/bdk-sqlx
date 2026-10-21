@@ -454,6 +454,98 @@ async fn out_of_range_values_error_on_load() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// SQLite INTEGER values outside the signed 32-bit range used by this schema,
+/// and wrong storage classes, must produce typed errors rather than panicking in
+/// sqlx's `Row::get`.
+#[tokio::test]
+async fn sqlite_oversized_and_mistyped_values_error_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+    let mut store = Store::<Sqlite>::new_with_url(None, wallet_name.clone(), NETWORK, true).await?;
+    let mut wallet = Wallet::create(external_desc, internal_desc)
+        .network(NETWORK)
+        .create_wallet_async(&mut store)
+        .await?;
+    let txid = insert_fake_tx(
+        &mut wallet,
+        Amount::from_sat(20_000),
+        Amount::from_sat(10_000),
+        Amount::from_sat(1_000),
+    );
+    let mut extra = ChangeSet::default();
+    extra.tx_graph.txouts.insert(
+        OutPoint { txid, vout: 0 },
+        TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Default::default(),
+        },
+    );
+    assert!(wallet.persist_async(&mut store).await?);
+    store.write(&extra).await?;
+
+    // height above i32::MAX
+    sqlx::query("UPDATE block SET height=2147483648 WHERE wallet_name=$1 AND height=2000")
+        .bind(&wallet_name)
+        .execute(&store.pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query("UPDATE block SET height=2000 WHERE wallet_name=$1 AND height=2147483648")
+        .bind(&wallet_name)
+        .execute(&store.pool)
+        .await?;
+
+    // vout above i32::MAX
+    sqlx::query("UPDATE txout SET vout=2147483648 WHERE wallet_name=$1 AND txid=$2 AND vout=0")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query("UPDATE txout SET vout=0 WHERE wallet_name=$1 AND txid=$2 AND vout=2147483648")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+
+    // last_revealed above i32::MAX
+    sqlx::query(
+        "UPDATE keychain SET last_revealed=2147483648 WHERE wallet_name=$1 AND keychainkind='External'",
+    )
+    .bind(&wallet_name)
+    .execute(&store.pool)
+    .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query(
+        "UPDATE keychain SET last_revealed=0 WHERE wallet_name=$1 AND keychainkind='External'",
+    )
+    .bind(&wallet_name)
+    .execute(&store.pool)
+    .await?;
+
+    // A BLOB where the schema promises TEXT must be reported, not panic.
+    sqlx::query("UPDATE tx SET txid=x'00ff' WHERE wallet_name=$1 AND txid=$2")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::QueryError { .. }));
+    sqlx::query("UPDATE tx SET txid=$2 WHERE wallet_name=$1 AND typeof(txid)='blob'")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+
+    store.read().await?;
+    Ok(())
+}
+
 /// Data stored for a different network than the store was configured with (or an
 /// unparseable network string) must fail the load instead of being silently accepted.
 #[tokio::test]
@@ -1343,6 +1435,54 @@ async fn two_wallets_load() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn unsupported_descriptors_error_without_panicking() {
+    // `DescriptorExt::descriptor_id()` unwraps `at_derivation_index(0)`, which
+    // panics for these valid-but-unsupported descriptor shapes.
+    let tpub = "tpubD6NzVbkrYhZ4XHndKkuB8FifXm8r5FQHwrN6oZuWCz13qb93rtgKvD4PQsqC4HP4yhV3tA2fqr2RbY5mNXfM7RxXUoeABoDtsFUq2zJq6YK";
+    for descriptor in [
+        format!("wpkh({tpub}/<0;1>/*)"),
+        format!("wpkh({tpub}/0/*')"),
+        format!("wpkh({tpub}/0'/1/*)"),
+    ] {
+        let mut changeset = ChangeSet::default();
+        assert_matches!(
+            crate::keychain_changeset_from_parts(&mut changeset, "External", &descriptor, None),
+            Err(BdkSqlxError::UnsupportedDescriptor),
+            "unsupported descriptor must not panic: {descriptor}"
+        );
+    }
+}
+
+/// A stored multipath/hardened descriptor must fail the load with a typed error
+/// instead of panicking while computing its descriptor id.
+#[tokio::test]
+async fn unsupported_stored_descriptor_errors_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "unsupported_stored_descriptor_errors_on_load".to_string();
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let mut store = Store::<Sqlite>::new_with_url(None, wallet_name.clone(), NETWORK, true).await?;
+    let mut wallet = Wallet::create(external_desc, internal_desc)
+        .network(NETWORK)
+        .create_wallet_async(&mut store)
+        .await?;
+    let _ = wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+    assert!(wallet.persist_async(&mut store).await?);
+
+    let tpub = "tpubD6NzVbkrYhZ4XHndKkuB8FifXm8r5FQHwrN6oZuWCz13qb93rtgKvD4PQsqC4HP4yhV3tA2fqr2RbY5mNXfM7RxXUoeABoDtsFUq2zJq6YK";
+    sqlx::query(
+        "UPDATE keychain SET descriptor=$2 WHERE wallet_name=$1 AND keychainkind='External'",
+    )
+    .bind(&wallet_name)
+    .bind(format!("wpkh({tpub}/<0;1>/*)"))
+    .execute(&store.pool)
+    .await?;
+
+    assert_matches!(store.read().await, Err(BdkSqlxError::UnsupportedDescriptor));
+    Ok(())
+}
+
+#[test]
 fn checked_conv_accepts_in_range_values() {
     assert_eq!(crate::checked_conv::<i32, u32>(42, "t").unwrap(), 42u32);
     assert_eq!(
@@ -1720,6 +1860,40 @@ async fn reanchor_after_reorg_roundtrip() -> anyhow::Result<()> {
             Some(&Some(block_hash(9)))
         );
         assert_eq!(loaded.tx_graph.txs.len(), 2, "txs must survive reorgs");
+    }
+    Ok(())
+}
+
+/// Anchors are distinct when their height or confirmation time differs, even
+/// when they share a block hash and transaction. A stale anchor must add its own
+/// row rather than overwrite a newer anchor's confirmation time.
+#[tokio::test]
+async fn anchor_identity_includes_height_and_confirmation_time() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "anchor_identity_includes_height_and_confirmation_time".to_string();
+    for mut store in create_test_stores(wallet_name).await? {
+        let txid = sample_tx(0, 1_000).compute_txid();
+        let same_block_early = anchor_at(10, block_hash(1), 100);
+        let same_block_late = anchor_at(10, block_hash(1), 200);
+        let other_height = anchor_at(20, block_hash(1), 100);
+
+        let mut cs = ChangeSet::default();
+        cs.tx_graph.anchors.insert((same_block_late, txid));
+        TestStore::persist(&mut store, &cs).await?;
+
+        // A stale observation of the same block with an earlier confirmation
+        // time must not replace the newer anchor.
+        let mut stale = ChangeSet::default();
+        stale.tx_graph.anchors.insert((same_block_early, txid));
+        stale.tx_graph.anchors.insert((other_height, txid));
+        TestStore::persist(&mut store, &stale).await?;
+
+        let loaded = TestStore::initialize(&mut store).await?;
+        assert_eq!(loaded.tx_graph.anchors.len(), 3);
+        assert!(loaded.tx_graph.anchors.contains(&(same_block_early, txid)));
+        assert!(loaded.tx_graph.anchors.contains(&(same_block_late, txid)));
+        assert!(loaded.tx_graph.anchors.contains(&(other_height, txid)));
     }
     Ok(())
 }

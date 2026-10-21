@@ -5,9 +5,7 @@
 // Standard library imports
 use std::{str::FromStr, sync::Arc};
 // Third party crates
-use bdk_chain::{
-    local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorExt, DescriptorId, Merge,
-};
+use bdk_chain::{local_chain, tx_graph, Anchor, ConfirmationBlockTime, DescriptorId, Merge};
 use bdk_wallet::{
     bitcoin::{
         self, consensus, hashes::Hash, Amount, BlockHash, Network, OutPoint, ScriptBuf, TxOut, Txid,
@@ -18,7 +16,7 @@ use bdk_wallet::{
     KeychainKind::{External, Internal},
 };
 use sqlx::{
-    postgres::{PgPool, Postgres},
+    postgres::{PgPool, PgRow, Postgres},
     sqlx_macros::migrate,
     Pool, Row, Transaction,
 };
@@ -28,6 +26,22 @@ use tracing::trace;
 use super::{BdkSqlxError, FutureResult, PgStoreBuilder, Store};
 
 type Result<T> = core::result::Result<T, BdkSqlxError>;
+
+/// Decode a column without panicking.
+///
+/// `Row::get` unwraps decode failures, which turns a corrupt or foreign-schema
+/// row into a process panic. Every read goes through this helper so NULL/type
+/// mismatches become typed errors instead.
+fn read_col<'r, T>(row: &'r PgRow, column: &str, table: &str) -> Result<T>
+where
+    T: sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres>,
+{
+    row.try_get(column)
+        .map_err(|source| BdkSqlxError::QueryError {
+            table: table.to_string(),
+            source,
+        })
+}
 
 impl AsyncWalletPersister for Store<Postgres> {
     type Error = BdkSqlxError;
@@ -222,7 +236,7 @@ impl Store<Postgres> {
                 source: e,
             })?;
         if let Some(row) = row {
-            let network: String = row.get("name");
+            let network: String = read_col(&row, "name", "read network")?;
             changeset.network = Some(crate::parse_and_validate_network(&network)?);
         }
 
@@ -241,14 +255,14 @@ impl Store<Postgres> {
             source: e,
         })?;
         for row in rows {
-            let keychainkind: String = row.get("keychainkind");
-            let descriptor: String = row.get("descriptor");
-            let last_revealed: Option<i32> = row.get("last_revealed");
+            let keychainkind: String = read_col(&row, "keychainkind", "read keychain")?;
+            let descriptor: String = read_col(&row, "descriptor", "read keychain")?;
+            let last_revealed: Option<i32> = read_col(&row, "last_revealed", "read keychain")?;
             crate::keychain_changeset_from_parts(
                 &mut changeset,
                 &keychainkind,
                 &descriptor,
-                last_revealed,
+                last_revealed.map(i64::from),
             )?;
         }
 
@@ -318,7 +332,7 @@ async fn insert_descriptor(
     trace!("insert descriptor");
     let descriptor_str = descriptor.to_string();
 
-    let descriptor_id = descriptor.descriptor_id().to_byte_array();
+    let descriptor_id = crate::descriptor_id_checked(descriptor)?.to_byte_array();
     let keychain = match keychain {
         External => "External",
         Internal => "Internal",
@@ -438,10 +452,10 @@ pub(crate) async fn tx_graph_changeset_from_postgres(
     })?;
 
     for row in rows {
-        let txid: String = row.get("txid");
+        let txid: String = read_col(&row, "txid", "select tx")?;
         let txid = Txid::from_str(&txid)?;
-        let whole_tx: Option<Vec<u8>> = row.get("whole_tx");
-        let last_seen: Option<i64> = row.get("last_seen");
+        let whole_tx: Option<Vec<u8>> = read_col(&row, "whole_tx", "select tx")?;
+        let last_seen: Option<i64> = read_col(&row, "last_seen", "select tx")?;
 
         if let Some(tx_bytes) = whole_tx {
             let tx: bitcoin::Transaction = consensus::deserialize(&tx_bytes)?;
@@ -474,11 +488,11 @@ pub(crate) async fn tx_graph_changeset_from_postgres(
     })?;
 
     for row in rows {
-        let txid: String = row.get("txid");
+        let txid: String = read_col(&row, "txid", "select txout")?;
         let txid = Txid::from_str(&txid)?;
-        let vout: i32 = row.get("vout");
-        let value: i64 = row.get("value");
-        let script: Vec<u8> = row.get("script");
+        let vout: i32 = read_col(&row, "vout", "select txout")?;
+        let value: i64 = read_col(&row, "value", "select txout")?;
+        let script: Vec<u8> = read_col(&row, "script", "select txout")?;
 
         changeset.txouts.insert(
             OutPoint {
@@ -494,7 +508,7 @@ pub(crate) async fn tx_graph_changeset_from_postgres(
 
     // Fetch anchors
     let rows = sqlx::query(
-        r#"SELECT anchor, txid, block_hash FROM "bdk_wallet"."anchor_tx" WHERE wallet_name = $1"#,
+        r#"SELECT anchor, txid, block_height, block_hash, confirmation_time FROM "bdk_wallet"."anchor_tx" WHERE wallet_name = $1"#,
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
@@ -505,18 +519,34 @@ pub(crate) async fn tx_graph_changeset_from_postgres(
     })?;
 
     for row in rows {
-        let anchor: serde_json::Value = row.get("anchor");
-        let txid: String = row.get("txid");
+        let anchor: serde_json::Value = read_col(&row, "anchor", "select anchor tx")?;
+        let txid: String = read_col(&row, "txid", "select anchor tx")?;
         let txid = Txid::from_str(&txid)?;
-        let block_hash: String = row.get("block_hash");
+        let block_height: i32 = read_col(&row, "block_height", "select anchor tx")?;
+        let block_hash: String = read_col(&row, "block_hash", "select anchor tx")?;
         let block_hash = BlockHash::from_str(&block_hash)?;
+        let confirmation_time: i64 = read_col(&row, "confirmation_time", "select anchor tx")?;
 
         let anchor: ConfirmationBlockTime = serde_json::from_value(anchor)?;
-        let computed = anchor.anchor_block().hash;
-        if computed != block_hash {
+        let computed_hash = anchor.block_id.hash;
+        if computed_hash != block_hash {
             return Err(BdkSqlxError::AnchorBlockHashMismatch {
                 stored: block_hash,
-                computed,
+                computed: computed_hash,
+            });
+        }
+        let stored_height: u32 = crate::checked_conv(block_height, "anchor.block_height")?;
+        if anchor.block_id.height != stored_height {
+            return Err(BdkSqlxError::AnchorBlockHeightMismatch {
+                stored: stored_height,
+                computed: anchor.block_id.height,
+            });
+        }
+        let stored_time: u64 = crate::checked_conv(confirmation_time, "anchor.confirmation_time")?;
+        if anchor.confirmation_time != stored_time {
+            return Err(BdkSqlxError::AnchorConfirmationTimeMismatch {
+                stored: stored_time,
+                computed: anchor.confirmation_time,
             });
         }
         changeset.anchors.insert((anchor, txid));
@@ -593,16 +623,22 @@ pub(crate) async fn tx_graph_changeset_persist_to_postgres(
     }
 
     for (anchor, txid) in &changeset.anchors {
-        let block_hash = anchor.anchor_block().hash;
+        let block_id = anchor.anchor_block();
+        let block_hash = block_id.hash;
+        let block_height = crate::checked_conv::<_, i32>(block_id.height, "anchor.block_height")?;
+        let confirmation_time =
+            crate::checked_conv::<_, i64>(anchor.confirmation_time, "anchor.confirmation_time")?;
         let anchor = serde_json::to_value(anchor)?;
         sqlx::query(
-            r#"INSERT INTO "bdk_wallet"."anchor_tx" (wallet_name, block_hash, anchor, txid) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (wallet_name, block_hash, txid) DO UPDATE SET anchor = $3"#,
+            r#"INSERT INTO "bdk_wallet"."anchor_tx" (wallet_name, txid, block_height, block_hash, confirmation_time, anchor) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (wallet_name, txid, block_height, block_hash, confirmation_time) DO UPDATE SET anchor = $6"#,
         )
         .bind(wallet_name)
-        .bind(block_hash.to_string())
-        .bind(anchor)
         .bind(txid.to_string())
+        .bind(block_height)
+        .bind(block_hash.to_string())
+        .bind(confirmation_time)
+        .bind(anchor)
         .execute(&mut **db_tx)
         .await
             .map_err(|e| BdkSqlxError::QueryError {
@@ -634,8 +670,8 @@ pub(crate) async fn local_chain_changeset_from_postgres(
             })?;
 
     for row in rows {
-        let hash: String = row.get("hash");
-        let height: i32 = row.get("height");
+        let hash: String = read_col(&row, "hash", "select block")?;
+        let height: i32 = read_col(&row, "height", "select block")?;
         let block_hash = BlockHash::from_str(&hash)?;
         changeset.blocks.insert(
             crate::checked_conv(height, "block.height")?,

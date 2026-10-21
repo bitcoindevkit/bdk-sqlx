@@ -15,9 +15,12 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use bdk_wallet::bitcoin;
+use bdk_wallet::bitcoin::hashes::{sha256, Hash};
 use bdk_wallet::bitcoin::{BlockHash, Network, Txid};
 use bdk_wallet::chain::miniscript;
-use bdk_wallet::chain::DescriptorExt;
+use bdk_wallet::chain::miniscript::descriptor::Wildcard;
+use bdk_wallet::chain::miniscript::ForEachKey;
+use bdk_wallet::chain::DescriptorId;
 use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey};
 use bdk_wallet::ChangeSet;
 /// Re-export of the [`sqlx`] crate this library is built on.
@@ -55,6 +58,24 @@ pub enum BdkSqlxError {
         /// block hash contained in the anchor payload
         computed: BlockHash,
     },
+    /// stored anchor references a different height than the stored block_height
+    #[error("anchor block height {computed} does not match stored block_height {stored}")]
+    AnchorBlockHeightMismatch {
+        /// height stored in the block_height column
+        stored: u32,
+        /// height contained in the anchor payload
+        computed: u32,
+    },
+    /// stored anchor references a different confirmation time than the stored column
+    #[error(
+        "anchor confirmation time {computed} does not match stored confirmation_time {stored}"
+    )]
+    AnchorConfirmationTimeMismatch {
+        /// confirmation time stored in the confirmation_time column
+        stored: u64,
+        /// confirmation time contained in the anchor payload
+        computed: u64,
+    },
     /// a changeset maps the same block hash to more than one height, which the
     /// block table cannot represent (its key is the hash itself)
     #[error(
@@ -68,6 +89,9 @@ pub enum BdkSqlxError {
         /// second, conflicting height
         second_height: u32,
     },
+    /// a stored or incoming descriptor uses a feature the store cannot derive
+    #[error("unsupported descriptor: multipath or hardened derivation")]
+    UnsupportedDescriptor,
     /// miniscript error
     #[error("miniscript error: {0}")]
     Miniscript(#[from] miniscript::Error),
@@ -184,6 +208,16 @@ where
     })
 }
 
+/// Converts a database `i64` to the `u32` domain this schema can represent.
+///
+/// The `u32` columns are declared as signed 32-bit `INTEGER`/`i32` so both
+/// backends agree on their range; a value outside that range is rejected like
+/// any other out-of-range database value rather than truncated.
+pub(crate) fn checked_u32(value: i64, context: &'static str) -> Result<u32, BdkSqlxError> {
+    let value: i32 = checked_conv(value, context)?;
+    checked_conv(value, context)
+}
+
 /// Process-global network configuration, shared by every store in the process
 /// regardless of backend. Persisting data for the wrong network wedges a
 /// wallet store, so the first store built fixes the network for the whole
@@ -248,6 +282,38 @@ pub(crate) fn parse_and_validate_network(stored: &str) -> Result<Network, BdkSql
     Ok(network)
 }
 
+/// Computes a descriptor's [`DescriptorId`] without the panic in
+/// `DescriptorExt::descriptor_id()`.
+///
+/// bdk_chain's implementation unwraps `at_derivation_index(0)`, which panics for
+/// multipath keys and hardened derivation (bdk_wallet rejects both when creating
+/// a wallet, but a stored or caller-supplied changeset may still contain one).
+/// Reject those shapes with a typed error before deriving the index-0 script.
+pub(crate) fn descriptor_id_checked(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> Result<DescriptorId, BdkSqlxError> {
+    let unsupported = descriptor.is_multipath()
+        || descriptor.for_any_key(|key| match key {
+            DescriptorPublicKey::XPub(xpub) => {
+                xpub.wildcard == Wildcard::Hardened
+                    || xpub
+                        .derivation_path
+                        .into_iter()
+                        .any(|step| step.is_hardened())
+            }
+            _ => false,
+        });
+    if unsupported {
+        return Err(BdkSqlxError::UnsupportedDescriptor);
+    }
+
+    let spk = descriptor
+        .at_derivation_index(0)
+        .map_err(|_| BdkSqlxError::UnsupportedDescriptor)?
+        .script_pubkey();
+    Ok(DescriptorId(sha256::Hash::hash(spk.as_bytes())))
+}
+
 /// Applies one stored keychain row to `changeset`.
 ///
 /// Shared by both backends so the parse and validation rules cannot drift
@@ -258,10 +324,10 @@ pub(crate) fn keychain_changeset_from_parts(
     changeset: &mut ChangeSet,
     keychainkind: &str,
     descriptor_str: &str,
-    last_revealed: Option<i32>,
+    last_revealed: Option<i64>,
 ) -> Result<(), BdkSqlxError> {
     let descriptor: Descriptor<DescriptorPublicKey> = descriptor_str.parse()?;
-    let did = descriptor.descriptor_id();
+    let did = descriptor_id_checked(&descriptor)?;
     match keychainkind {
         "External" => changeset.descriptor = Some(descriptor),
         "Internal" => changeset.change_descriptor = Some(descriptor),
@@ -275,7 +341,7 @@ pub(crate) fn keychain_changeset_from_parts(
         changeset
             .indexer
             .last_revealed
-            .insert(did, checked_conv(last_rev, "keychain.last_revealed")?);
+            .insert(did, checked_u32(last_rev, "keychain.last_revealed")?);
     }
     Ok(())
 }
