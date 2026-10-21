@@ -15,9 +15,12 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use bdk_wallet::bitcoin;
+use bdk_wallet::bitcoin::hashes::{sha256, Hash};
 use bdk_wallet::bitcoin::{BlockHash, Network, Txid};
 use bdk_wallet::chain::miniscript;
-use bdk_wallet::chain::DescriptorExt;
+use bdk_wallet::chain::miniscript::descriptor::Wildcard;
+use bdk_wallet::chain::miniscript::ForEachKey;
+use bdk_wallet::chain::DescriptorId;
 use bdk_wallet::descriptor::{Descriptor, DescriptorPublicKey};
 use bdk_wallet::ChangeSet;
 /// Re-export of the [`sqlx`] crate this library is built on.
@@ -86,6 +89,9 @@ pub enum BdkSqlxError {
         /// second, conflicting height
         second_height: u32,
     },
+    /// a stored or incoming descriptor uses a feature the store cannot derive
+    #[error("unsupported descriptor: multipath or hardened derivation")]
+    UnsupportedDescriptor,
     /// miniscript error
     #[error("miniscript error: {0}")]
     Miniscript(#[from] miniscript::Error),
@@ -276,6 +282,38 @@ pub(crate) fn parse_and_validate_network(stored: &str) -> Result<Network, BdkSql
     Ok(network)
 }
 
+/// Computes a descriptor's [`DescriptorId`] without the panic in
+/// `DescriptorExt::descriptor_id()`.
+///
+/// bdk_chain's implementation unwraps `at_derivation_index(0)`, which panics for
+/// multipath keys and hardened derivation (bdk_wallet rejects both when creating
+/// a wallet, but a stored or caller-supplied changeset may still contain one).
+/// Reject those shapes with a typed error before deriving the index-0 script.
+pub(crate) fn descriptor_id_checked(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> Result<DescriptorId, BdkSqlxError> {
+    let unsupported = descriptor.is_multipath()
+        || descriptor.for_any_key(|key| match key {
+            DescriptorPublicKey::XPub(xpub) => {
+                xpub.wildcard == Wildcard::Hardened
+                    || xpub
+                        .derivation_path
+                        .into_iter()
+                        .any(|step| step.is_hardened())
+            }
+            _ => false,
+        });
+    if unsupported {
+        return Err(BdkSqlxError::UnsupportedDescriptor);
+    }
+
+    let spk = descriptor
+        .at_derivation_index(0)
+        .map_err(|_| BdkSqlxError::UnsupportedDescriptor)?
+        .script_pubkey();
+    Ok(DescriptorId(sha256::Hash::hash(spk.as_bytes())))
+}
+
 /// Applies one stored keychain row to `changeset`.
 ///
 /// Shared by both backends so the parse and validation rules cannot drift
@@ -289,7 +327,7 @@ pub(crate) fn keychain_changeset_from_parts(
     last_revealed: Option<i64>,
 ) -> Result<(), BdkSqlxError> {
     let descriptor: Descriptor<DescriptorPublicKey> = descriptor_str.parse()?;
-    let did = descriptor.descriptor_id();
+    let did = descriptor_id_checked(&descriptor)?;
     match keychainkind {
         "External" => changeset.descriptor = Some(descriptor),
         "Internal" => changeset.change_descriptor = Some(descriptor),
