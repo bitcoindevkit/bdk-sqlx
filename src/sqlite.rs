@@ -21,6 +21,26 @@ use sqlx::sqlx_macros::migrate;
 use sqlx::{sqlite::Sqlite, Pool, Row, Transaction};
 use tracing::trace;
 
+/// Decode a column without panicking.
+///
+/// `Row::get` unwraps decode failures, which turns a corrupt or foreign-schema
+/// row into a process panic. Every read goes through this helper so storage
+/// class mismatches and out-of-range integers become typed errors instead.
+fn read_col<'r, T>(
+    row: &'r sqlx::sqlite::SqliteRow,
+    column: &str,
+    table: &str,
+) -> Result<T, BdkSqlxError>
+where
+    T: sqlx::Decode<'r, Sqlite> + sqlx::Type<Sqlite>,
+{
+    row.try_get(column)
+        .map_err(|source| BdkSqlxError::QueryError {
+            table: table.to_string(),
+            source,
+        })
+}
+
 impl AsyncWalletPersister for Store<Sqlite> {
     type Error = BdkSqlxError;
 
@@ -256,7 +276,7 @@ impl Store<Sqlite> {
                 source: e,
             })?;
         if let Some(row) = row {
-            let network: String = row.get("name");
+            let network: String = read_col(&row, "name", "read network")?;
             changeset.network = Some(crate::parse_and_validate_network(&network)?);
         }
 
@@ -275,9 +295,9 @@ impl Store<Sqlite> {
             source: e,
         })?;
         for row in rows {
-            let keychainkind: String = row.get("keychainkind");
-            let descriptor: String = row.get("descriptor");
-            let last_revealed: Option<i32> = row.get("last_revealed");
+            let keychainkind: String = read_col(&row, "keychainkind", "read keychain")?;
+            let descriptor: String = read_col(&row, "descriptor", "read keychain")?;
+            let last_revealed: Option<i64> = read_col(&row, "last_revealed", "read keychain")?;
             crate::keychain_changeset_from_parts(
                 &mut changeset,
                 &keychainkind,
@@ -473,10 +493,10 @@ pub(crate) async fn tx_graph_changeset_from_sqlite(
         })?;
 
     for row in rows {
-        let txid: String = row.get("txid");
+        let txid: String = read_col(&row, "txid", "select tx")?;
         let txid = Txid::from_str(&txid)?;
-        let whole_tx: Option<Vec<u8>> = row.get("whole_tx");
-        let last_seen: Option<i64> = row.get("last_seen");
+        let whole_tx: Option<Vec<u8>> = read_col(&row, "whole_tx", "select tx")?;
+        let last_seen: Option<i64> = read_col(&row, "last_seen", "select tx")?;
 
         if let Some(tx_bytes) = whole_tx {
             let tx: bitcoin::Transaction = consensus::deserialize(&tx_bytes)?;
@@ -507,16 +527,16 @@ pub(crate) async fn tx_graph_changeset_from_sqlite(
         })?;
 
     for row in rows {
-        let txid: String = row.get("txid");
+        let txid: String = read_col(&row, "txid", "select txout")?;
         let txid = Txid::from_str(&txid)?;
-        let vout: i32 = row.get("vout");
-        let value: i64 = row.get("value");
-        let script: Vec<u8> = row.get("script");
+        let vout: i64 = read_col(&row, "vout", "select txout")?;
+        let value: i64 = read_col(&row, "value", "select txout")?;
+        let script: Vec<u8> = read_col(&row, "script", "select txout")?;
 
         changeset.txouts.insert(
             OutPoint {
                 txid,
-                vout: crate::checked_conv(vout, "txout.vout")?,
+                vout: crate::checked_u32(vout, "txout.vout")?,
             },
             TxOut {
                 value: Amount::from_sat(crate::checked_conv(value, "txout.value")?),
@@ -538,13 +558,13 @@ pub(crate) async fn tx_graph_changeset_from_sqlite(
     })?;
 
     for row in rows {
-        let anchor: serde_json::Value = row.get("anchor");
-        let txid: String = row.get("txid");
+        let anchor: serde_json::Value = read_col(&row, "anchor", "select anchor tx")?;
+        let txid: String = read_col(&row, "txid", "select anchor tx")?;
         let txid = Txid::from_str(&txid)?;
-        let block_height: i32 = row.get("block_height");
-        let block_hash: String = row.get("block_hash");
+        let block_height: i64 = read_col(&row, "block_height", "select anchor tx")?;
+        let block_hash: String = read_col(&row, "block_hash", "select anchor tx")?;
         let block_hash = BlockHash::from_str(&block_hash)?;
-        let confirmation_time: i64 = row.get("confirmation_time");
+        let confirmation_time: i64 = read_col(&row, "confirmation_time", "select anchor tx")?;
 
         let anchor: ConfirmationBlockTime = serde_json::from_value(anchor)?;
         let computed_hash = anchor.block_id.hash;
@@ -554,7 +574,7 @@ pub(crate) async fn tx_graph_changeset_from_sqlite(
                 computed: computed_hash,
             });
         }
-        let stored_height: u32 = crate::checked_conv(block_height, "anchor.block_height")?;
+        let stored_height = crate::checked_u32(block_height, "anchor.block_height")?;
         if anchor.block_id.height != stored_height {
             return Err(BdkSqlxError::AnchorBlockHeightMismatch {
                 stored: stored_height,
@@ -691,11 +711,11 @@ pub(crate) async fn local_chain_changeset_from_sqlite(
         })?;
 
     for row in rows {
-        let hash: String = row.get("hash");
-        let height: i32 = row.get("height");
+        let hash: String = read_col(&row, "hash", "select block")?;
+        let height: i64 = read_col(&row, "height", "select block")?;
         let block_hash = BlockHash::from_str(&hash)?;
         changeset.blocks.insert(
-            crate::checked_conv(height, "block.height")?,
+            crate::checked_u32(height, "block.height")?,
             Some(block_hash),
         );
     }

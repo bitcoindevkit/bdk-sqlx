@@ -202,6 +202,16 @@ where
     })
 }
 
+/// Converts a database `i64` to the `u32` domain this schema can represent.
+///
+/// The `u32` columns are declared as signed 32-bit `INTEGER`/`i32` so both
+/// backends agree on their range; a value outside that range is rejected like
+/// any other out-of-range database value rather than truncated.
+pub(crate) fn checked_u32(value: i64, context: &'static str) -> Result<u32, BdkSqlxError> {
+    let value: i32 = checked_conv(value, context)?;
+    checked_conv(value, context)
+}
+
 /// Process-global network configuration, shared by every store in the process
 /// regardless of backend. Persisting data for the wrong network wedges a
 /// wallet store, so the first store built fixes the network for the whole
@@ -276,7 +286,7 @@ pub(crate) fn keychain_changeset_from_parts(
     changeset: &mut ChangeSet,
     keychainkind: &str,
     descriptor_str: &str,
-    last_revealed: Option<i32>,
+    last_revealed: Option<i64>,
 ) -> Result<(), BdkSqlxError> {
     let descriptor: Descriptor<DescriptorPublicKey> = descriptor_str.parse()?;
     let did = descriptor.descriptor_id();
@@ -293,7 +303,7 @@ pub(crate) fn keychain_changeset_from_parts(
         changeset
             .indexer
             .last_revealed
-            .insert(did, checked_conv(last_rev, "keychain.last_revealed")?);
+            .insert(did, checked_u32(last_rev, "keychain.last_revealed")?);
     }
     Ok(())
 }

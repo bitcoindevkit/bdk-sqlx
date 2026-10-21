@@ -454,6 +454,98 @@ async fn out_of_range_values_error_on_load() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// SQLite INTEGER values outside the signed 32-bit range used by this schema,
+/// and wrong storage classes, must produce typed errors rather than panicking in
+/// sqlx's `Row::get`.
+#[tokio::test]
+async fn sqlite_oversized_and_mistyped_values_error_on_load() -> anyhow::Result<()> {
+    initialize();
+
+    let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
+    let wallet_name = wallet_name_from_descriptor(
+        external_desc,
+        Some(internal_desc),
+        NETWORK,
+        &Secp256k1::new(),
+    )?;
+    let mut store = Store::<Sqlite>::new_with_url(None, wallet_name.clone(), NETWORK, true).await?;
+    let mut wallet = Wallet::create(external_desc, internal_desc)
+        .network(NETWORK)
+        .create_wallet_async(&mut store)
+        .await?;
+    let txid = insert_fake_tx(
+        &mut wallet,
+        Amount::from_sat(20_000),
+        Amount::from_sat(10_000),
+        Amount::from_sat(1_000),
+    );
+    let mut extra = ChangeSet::default();
+    extra.tx_graph.txouts.insert(
+        OutPoint { txid, vout: 0 },
+        TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Default::default(),
+        },
+    );
+    assert!(wallet.persist_async(&mut store).await?);
+    store.write(&extra).await?;
+
+    // height above i32::MAX
+    sqlx::query("UPDATE block SET height=2147483648 WHERE wallet_name=$1 AND height=2000")
+        .bind(&wallet_name)
+        .execute(&store.pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query("UPDATE block SET height=2000 WHERE wallet_name=$1 AND height=2147483648")
+        .bind(&wallet_name)
+        .execute(&store.pool)
+        .await?;
+
+    // vout above i32::MAX
+    sqlx::query("UPDATE txout SET vout=2147483648 WHERE wallet_name=$1 AND txid=$2 AND vout=0")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query("UPDATE txout SET vout=0 WHERE wallet_name=$1 AND txid=$2 AND vout=2147483648")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+
+    // last_revealed above i32::MAX
+    sqlx::query(
+        "UPDATE keychain SET last_revealed=2147483648 WHERE wallet_name=$1 AND keychainkind='External'",
+    )
+    .bind(&wallet_name)
+    .execute(&store.pool)
+    .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::IntOutOfRange { .. }));
+    sqlx::query(
+        "UPDATE keychain SET last_revealed=0 WHERE wallet_name=$1 AND keychainkind='External'",
+    )
+    .bind(&wallet_name)
+    .execute(&store.pool)
+    .await?;
+
+    // A BLOB where the schema promises TEXT must be reported, not panic.
+    sqlx::query("UPDATE tx SET txid=x'00ff' WHERE wallet_name=$1 AND txid=$2")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+    assert_matches!(store.read().await, Err(BdkSqlxError::QueryError { .. }));
+    sqlx::query("UPDATE tx SET txid=$2 WHERE wallet_name=$1 AND typeof(txid)='blob'")
+        .bind(&wallet_name)
+        .bind(txid.to_string())
+        .execute(&store.pool)
+        .await?;
+
+    store.read().await?;
+    Ok(())
+}
+
 /// Data stored for a different network than the store was configured with (or an
 /// unparseable network string) must fail the load instead of being silently accepted.
 #[tokio::test]
