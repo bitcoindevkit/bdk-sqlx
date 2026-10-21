@@ -527,7 +527,7 @@ pub(crate) async fn tx_graph_changeset_from_sqlite(
 
     // Fetch anchors
     let rows = sqlx::query(
-        "SELECT json(anchor) as anchor, txid, block_hash FROM anchor_tx WHERE wallet_name = $1",
+        "SELECT json(anchor) as anchor, txid, block_height, block_hash, confirmation_time FROM anchor_tx WHERE wallet_name = $1",
     )
     .bind(wallet_name)
     .fetch_all(&mut **db_tx)
@@ -541,15 +541,31 @@ pub(crate) async fn tx_graph_changeset_from_sqlite(
         let anchor: serde_json::Value = row.get("anchor");
         let txid: String = row.get("txid");
         let txid = Txid::from_str(&txid)?;
+        let block_height: i32 = row.get("block_height");
         let block_hash: String = row.get("block_hash");
         let block_hash = BlockHash::from_str(&block_hash)?;
+        let confirmation_time: i64 = row.get("confirmation_time");
 
         let anchor: ConfirmationBlockTime = serde_json::from_value(anchor)?;
-        let computed = anchor.anchor_block().hash;
-        if computed != block_hash {
+        let computed_hash = anchor.block_id.hash;
+        if computed_hash != block_hash {
             return Err(BdkSqlxError::AnchorBlockHashMismatch {
                 stored: block_hash,
-                computed,
+                computed: computed_hash,
+            });
+        }
+        let stored_height: u32 = crate::checked_conv(block_height, "anchor.block_height")?;
+        if anchor.block_id.height != stored_height {
+            return Err(BdkSqlxError::AnchorBlockHeightMismatch {
+                stored: stored_height,
+                computed: anchor.block_id.height,
+            });
+        }
+        let stored_time: u64 = crate::checked_conv(confirmation_time, "anchor.confirmation_time")?;
+        if anchor.confirmation_time != stored_time {
+            return Err(BdkSqlxError::AnchorConfirmationTimeMismatch {
+                stored: stored_time,
+                computed: anchor.confirmation_time,
             });
         }
         changeset.anchors.insert((anchor, txid));
@@ -629,16 +645,22 @@ pub(crate) async fn tx_graph_changeset_persist_to_sqlite(
     }
 
     for (anchor, txid) in &changeset.anchors {
-        let block_hash = anchor.anchor_block().hash;
+        let block_id = anchor.anchor_block();
+        let block_hash = block_id.hash;
+        let block_height = crate::checked_conv::<_, i32>(block_id.height, "anchor.block_height")?;
+        let confirmation_time =
+            crate::checked_conv::<_, i64>(anchor.confirmation_time, "anchor.confirmation_time")?;
         let anchor = serde_json::to_value(anchor)?;
         sqlx::query(
-            "INSERT INTO anchor_tx (wallet_name, block_hash, anchor, txid) VALUES ($1, $2, jsonb($3), $4)
-             ON CONFLICT (wallet_name, block_hash, txid) DO UPDATE SET anchor = jsonb($3)",
+            "INSERT INTO anchor_tx (wallet_name, txid, block_height, block_hash, confirmation_time, anchor) VALUES ($1, $2, $3, $4, $5, jsonb($6))
+             ON CONFLICT (wallet_name, txid, block_height, block_hash, confirmation_time) DO UPDATE SET anchor = jsonb($6)",
         )
         .bind(wallet_name)
-        .bind(block_hash.to_string())
-        .bind(anchor)
         .bind(txid.to_string())
+        .bind(block_height)
+        .bind(block_hash.to_string())
+        .bind(confirmation_time)
+        .bind(anchor)
         .execute(&mut **db_tx)
         .await
         .map_err(|e| BdkSqlxError::QueryError {

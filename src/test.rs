@@ -1724,6 +1724,40 @@ async fn reanchor_after_reorg_roundtrip() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Anchors are distinct when their height or confirmation time differs, even
+/// when they share a block hash and transaction. A stale anchor must add its own
+/// row rather than overwrite a newer anchor's confirmation time.
+#[tokio::test]
+async fn anchor_identity_includes_height_and_confirmation_time() -> anyhow::Result<()> {
+    initialize();
+
+    let wallet_name = "anchor_identity_includes_height_and_confirmation_time".to_string();
+    for mut store in create_test_stores(wallet_name).await? {
+        let txid = sample_tx(0, 1_000).compute_txid();
+        let same_block_early = anchor_at(10, block_hash(1), 100);
+        let same_block_late = anchor_at(10, block_hash(1), 200);
+        let other_height = anchor_at(20, block_hash(1), 100);
+
+        let mut cs = ChangeSet::default();
+        cs.tx_graph.anchors.insert((same_block_late, txid));
+        TestStore::persist(&mut store, &cs).await?;
+
+        // A stale observation of the same block with an earlier confirmation
+        // time must not replace the newer anchor.
+        let mut stale = ChangeSet::default();
+        stale.tx_graph.anchors.insert((same_block_early, txid));
+        stale.tx_graph.anchors.insert((other_height, txid));
+        TestStore::persist(&mut store, &stale).await?;
+
+        let loaded = TestStore::initialize(&mut store).await?;
+        assert_eq!(loaded.tx_graph.anchors.len(), 3);
+        assert!(loaded.tx_graph.anchors.contains(&(same_block_early, txid)));
+        assert!(loaded.tx_graph.anchors.contains(&(same_block_late, txid)));
+        assert!(loaded.tx_graph.anchors.contains(&(other_height, txid)));
+    }
+    Ok(())
+}
+
 /// Advancing the derivation index across multiple persist/load cycles.
 #[tokio::test]
 async fn derivation_index_advances_across_loads() -> anyhow::Result<()> {
